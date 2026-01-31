@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { usePathname } from "next/navigation";
 
 type UserId = "alex" | "bob" | "jeff" | "sean";
 
@@ -23,9 +24,9 @@ function getActiveUser(): UserId {
 
 export default function Nav() {
   const [activeUser, setActiveUser] = useState<UserId>("alex");
+  const pathname = usePathname();
 
   useEffect(() => {
-    // initialize from localStorage
     setActiveUser(getActiveUser());
   }, []);
 
@@ -39,6 +40,16 @@ export default function Nav() {
     window.dispatchEvent(new Event("fantasy-life:activeUserChanged"));
   };
 
+  const linkClass = (href: string) => {
+    const active = pathname === href;
+    return [
+      "text-sm font-semibold transition",
+      active
+        ? "text-slate-900 border-b-2 border-slate-900 pb-1"
+        : "text-slate-600 hover:text-slate-900",
+    ].join(" ");
+  };
+
   return (
     <nav className="w-full border-b border-slate-200 bg-white">
       <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-5 py-3">
@@ -46,11 +57,17 @@ export default function Nav() {
           <Link href="/" className="font-bold text-slate-900">
             fantasy-life
           </Link>
-          <Link href="/tasks" className="text-sm font-semibold text-slate-700 hover:text-slate-900">
+
+          <Link href="/tasks" className={linkClass("/tasks")}>
             My Tasks
           </Link>
-          <Link href="/team" className="text-sm font-semibold text-slate-700 hover:text-slate-900">
+
+          <Link href="/team" className={linkClass("/team")}>
             My Team
+          </Link>
+
+          <Link href="/feed" className={linkClass("/feed")}>
+            Feed
           </Link>
         </div>
 
