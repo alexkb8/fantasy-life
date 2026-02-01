@@ -2,29 +2,34 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabase";
+import Avatar from "../components/Avatar";
 
-type UserId = "alex" | "bob" | "jeff" | "sean";
 type Timeframe = "weekly" | "monthly" | "yearly";
+const POINTS: Record<Timeframe, number> = { weekly: 1, monthly: 4, yearly: 40 };
+const SLOT_COUNTS: Record<Timeframe, number> = { weekly: 3, monthly: 2, yearly: 2 };
 
-type Goal = {
+type PickRow = {
+  manager_id: string; // handle
+  timeframe: Timeframe;
+  slot_index: number;
+  player_id: string; // handle
+};
+
+type TaskRow = {
+  user_id: string; // handle
   timeframe: Timeframe;
   slot_index: number;
   title: string;
   done_at: string | null;
 };
 
-type TasksState = {
-  weekly: Goal[];  // 3
-  monthly: Goal[]; // 2
-  yearly: Goal[];  // 2
+type ProfileRow = {
+  handle: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
 };
 
-type TeamPicks = {
-  weekly: UserId[];
-  monthly: UserId[];
-  yearly: UserId[];
-};
-
+type UserId = "alex" | "bob" | "jeff" | "sean";
 const ACTIVE_USER_KEY = "fantasy-life:activeUser";
 
 function getActiveUser(): UserId {
@@ -34,306 +39,319 @@ function getActiveUser(): UserId {
   return "alex";
 }
 
-// Time helpers
-function pad2(n: number) {
-  return n < 10 ? `0${n}` : `${n}`;
+function pickKey(tf: Timeframe, i: number) {
+  return `${tf}:${i}`;
 }
-function isoWeekKey(d: Date) {
-  const date = new Date(d);
-  date.setHours(0, 0, 0, 0);
-  const day = ((date.getDay() + 6) % 7) + 1;
+function taskKey(u: string, tf: Timeframe, i: number) {
+  return `${u}|${tf}|${i}`;
+}
+
+/** ---- Time helpers ---- */
+function startOfDay(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function addDays(d: Date, n: number) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+function isoWeekStart(d: Date) {
+  const date = startOfDay(d);
+  const day = (date.getDay() + 6) % 7; // Mon=0..Sun=6
+  date.setDate(date.getDate() - day);
+  return date; // Monday
+}
+function isoWeekNumber(d: Date) {
+  const date = startOfDay(d);
+  const day = ((date.getDay() + 6) % 7) + 1; // Mon=1..Sun=7
   date.setDate(date.getDate() + (4 - day));
-  const year = date.getFullYear();
-  const yearStart = new Date(year, 0, 1);
-  yearStart.setHours(0, 0, 0, 0);
+  const yearStart = new Date(date.getFullYear(), 0, 1);
   const diffDays = Math.floor((date.getTime() - yearStart.getTime()) / 86400000);
-  const week = Math.floor(diffDays / 7) + 1;
-  return `${year}-W${pad2(week)}`;
+  return Math.floor(diffDays / 7) + 1;
 }
-function monthKey(d: Date) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+function daysLeftInclusive(endDate: Date) {
+  const today = startOfDay(new Date()).getTime();
+  const end = startOfDay(endDate).getTime();
+  const diff = Math.ceil((end - today) / 86400000);
+  return diff < 0 ? 0 : diff;
 }
-function yearKey(d: Date) {
-  return `${d.getFullYear()}`;
+function fmtShort(d: Date) {
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-function currentPeriodKey(tf: Timeframe) {
-  const now = new Date();
-  if (tf === "weekly") return isoWeekKey(now);
-  if (tf === "monthly") return monthKey(now);
-  return yearKey(now);
-}
-function doneKey(tf: Timeframe, doneAt: string | null) {
-  if (!doneAt) return null;
-  const d = new Date(doneAt);
-  if (tf === "weekly") return isoWeekKey(d);
-  if (tf === "monthly") return monthKey(d);
-  return yearKey(d);
-}
-function isDoneNow(tf: Timeframe, doneAt: string | null) {
-  return doneKey(tf, doneAt) === currentPeriodKey(tf);
-}
-
-function FieldRow(props: { children: React.ReactNode }) {
-  return <div className="flex w-full justify-center gap-4">{props.children}</div>;
-}
-
-function PlayerGoalCard(props: {
-  slotLabel: string;
-  playerId: UserId;
-  goalTitle: string;
-  doneNow: boolean;
-}) {
-  const { slotLabel, playerId, goalTitle, doneNow } = props;
-  const playerName = playerId[0].toUpperCase() + playerId.slice(1);
-
-  return (
-    <div className="w-full max-w-[260px]">
-      <div className="rounded-2xl border border-white/25 bg-white/10 p-3 shadow-sm backdrop-blur">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-xs font-semibold tracking-wide text-white/90">
-            {slotLabel} • {playerName}
-          </div>
-
-          <label className="flex items-center gap-2 text-white/90">
-            <input type="checkbox" checked={doneNow} disabled className="h-4 w-4 accent-white disabled:opacity-80" />
-            <span className="text-xs">{doneNow ? "Done" : "Not yet"}</span>
-          </label>
-        </div>
-
-        <div className="mt-2 rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white/95">
-          {goalTitle}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function PointsCard(props: { weeklyDone: number; monthlyDone: number; yearlyDone: number }) {
-  const { weeklyDone, monthlyDone, yearlyDone } = props;
-  const points = weeklyDone * 1 + monthlyDone * 4 + yearlyDone * 40;
-
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-      <div className="text-sm font-semibold text-slate-700">Points</div>
-      <div className="mt-1 text-4xl font-extrabold tracking-tight text-slate-900">{points}</div>
-
-      <div className="mt-3 grid gap-2 text-sm">
-        <div className="flex justify-between text-slate-700">
-          <span>Weekly done</span>
-          <span className="font-semibold">{weeklyDone} × 1</span>
-        </div>
-        <div className="flex justify-between text-slate-700">
-          <span>Monthly done</span>
-          <span className="font-semibold">{monthlyDone} × 4</span>
-        </div>
-        <div className="flex justify-between text-slate-700">
-          <span>Yearly done</span>
-          <span className="font-semibold">{yearlyDone} × 40</span>
-        </div>
-      </div>
-
-      <div className="mt-3 text-xs text-slate-500">
-        Week: <b>{currentPeriodKey("weekly")}</b> · Month: <b>{currentPeriodKey("monthly")}</b>
-      </div>
-    </div>
-  );
+function fmtLong(d: Date) {
+  return d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
 }
 
 export default function TeamPage() {
   const [activeUser, setActiveUser] = useState<UserId>("alex");
+
+  const [nameByHandle, setNameByHandle] = useState<Record<string, string>>({});
+  const [avatarByHandle, setAvatarByHandle] = useState<Record<string, string>>({});
+
+  const [picksBySlot, setPicksBySlot] = useState<Record<string, PickRow | null>>({});
+  const [tasksByKey, setTasksByKey] = useState<Record<string, TaskRow>>({});
+
   const [loading, setLoading] = useState(true);
+  const [msg, setMsg] = useState<string>("");
 
-  const makeBlank = (user: UserId): TasksState => ({
-    weekly: Array.from({ length: 3 }, (_, i) => ({ timeframe: "weekly", slot_index: i, title: `${user}: Weekly goal ${i + 1}`, done_at: null })),
-    monthly: Array.from({ length: 2 }, (_, i) => ({ timeframe: "monthly", slot_index: i, title: `${user}: Monthly goal ${i + 1}`, done_at: null })),
-    yearly: Array.from({ length: 2 }, (_, i) => ({ timeframe: "yearly", slot_index: i, title: `${user}: Yearly goal ${i + 1}`, done_at: null })),
-  });
+  useEffect(() => {
+    setActiveUser(getActiveUser());
+    const onChange = () => setActiveUser(getActiveUser());
+    window.addEventListener("fantasy-life:activeUserChanged", onChange);
+    return () => window.removeEventListener("fantasy-life:activeUserChanged", onChange);
+  }, []);
 
-  const [team, setTeam] = useState<TeamPicks>({
-    weekly: ["bob", "jeff", "sean"],
-    monthly: ["bob", "jeff"],
-    yearly: ["sean", "bob"],
-  });
+  const managerName = useMemo(() => {
+    const fallback = activeUser.charAt(0).toUpperCase() + activeUser.slice(1);
+    return nameByHandle[activeUser] ?? fallback;
+  }, [activeUser, nameByHandle]);
 
-  const [tasksByUser, setTasksByUser] = useState<Record<UserId, TasksState>>({
-    alex: makeBlank("alex"),
-    bob: makeBlank("bob"),
-    jeff: makeBlank("jeff"),
-    sean: makeBlank("sean"),
-  });
+  const seasonClock = useMemo(() => {
+    const now = new Date();
+    const wkNum = isoWeekNumber(now);
+    const wkStart = isoWeekStart(now);
+    const wkEnd = addDays(wkStart, 6);
 
-  const loadTeamAndTasks = async (manager: UserId) => {
-    setLoading(true);
-    setActiveUser(manager);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
 
-    const { data: picksData } = await supabase
-      .from("team_picks")
-      .select("timeframe, slot_index, player_id")
-      .eq("manager_id", manager);
+    return {
+      today: fmtLong(now),
+      weekLabel: `Week ${wkNum}`,
+      weekRange: `${fmtShort(wkStart)} – ${fmtShort(wkEnd)}`,
+      weekEndsIn: daysLeftInclusive(wkEnd),
+      monthLabel: now.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
+      monthEndsIn: daysLeftInclusive(monthEnd),
+    };
+  }, []);
 
-    const weekly = Array(3).fill("alex") as UserId[];
-    const monthly = Array(2).fill("alex") as UserId[];
-    const yearly = Array(2).fill("alex") as UserId[];
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      setMsg("");
 
-    for (const p of (picksData ?? []) as any[]) {
-      const tf = p.timeframe as Timeframe;
-      const idx = p.slot_index as number;
-      const player = p.player_id as UserId;
+      // 1) Profiles by handle (for avatars/names)
+      const profRes = await supabase.from("profiles").select("handle, display_name, avatar_url");
+      if (!profRes.error) {
+        const nb: Record<string, string> = {};
+        const ab: Record<string, string> = {};
+        for (const r of (profRes.data ?? []) as ProfileRow[]) {
+          if (!r.handle) continue;
+          nb[r.handle] = r.display_name || r.handle;
+          if (r.avatar_url) ab[r.handle] = r.avatar_url;
+        }
+        setNameByHandle(nb);
+        setAvatarByHandle(ab);
+      }
 
-      if (tf === "weekly" && idx >= 0 && idx < 3) weekly[idx] = player;
-      if (tf === "monthly" && idx >= 0 && idx < 2) monthly[idx] = player;
-      if (tf === "yearly" && idx >= 0 && idx < 2) yearly[idx] = player;
-    }
-    setTeam({ weekly, monthly, yearly });
+      // 2) Picks for this manager
+      const pRes = await supabase
+        .from("team_picks")
+        .select("manager_id,timeframe,slot_index,player_id")
+        .eq("manager_id", activeUser);
 
-    const { data: rows } = await supabase
-      .from("tasks")
-      .select("user_id, timeframe, slot_index, title, done_at")
-      .in("user_id", ["alex", "bob", "jeff", "sean"]);
+      if (pRes.error) {
+        setMsg(pRes.error.message);
+        setLoading(false);
+        return;
+      }
 
-    const next: Record<UserId, TasksState> = {
-      alex: makeBlank("alex"),
-      bob: makeBlank("bob"),
-      jeff: makeBlank("jeff"),
-      sean: makeBlank("sean"),
+      const picks = (pRes.data ?? []) as PickRow[];
+      const bySlot: Record<string, PickRow | null> = {};
+
+      (["weekly", "monthly", "yearly"] as Timeframe[]).forEach((tf) => {
+        for (let i = 0; i < SLOT_COUNTS[tf]; i++) bySlot[pickKey(tf, i)] = null;
+      });
+      for (const p of picks) bySlot[pickKey(p.timeframe, p.slot_index)] = p;
+      setPicksBySlot(bySlot);
+
+      // 3) Load tasks for drafted players
+      const draftedPlayers = Array.from(new Set(picks.map((p) => p.player_id)));
+      if (draftedPlayers.length === 0) {
+        setTasksByKey({});
+        setLoading(false);
+        return;
+      }
+
+      const tRes = await supabase
+        .from("tasks")
+        .select("user_id,timeframe,slot_index,title,done_at")
+        .in("user_id", draftedPlayers);
+
+      if (tRes.error) {
+        setMsg(tRes.error.message);
+        setLoading(false);
+        return;
+      }
+
+      const tmap: Record<string, TaskRow> = {};
+      for (const t of (tRes.data ?? []) as TaskRow[]) {
+        tmap[taskKey(t.user_id, t.timeframe, t.slot_index)] = t;
+      }
+      setTasksByKey(tmap);
+
+      setLoading(false);
     };
 
-    for (const r of (rows ?? []) as any[]) {
-      const user = r.user_id as UserId;
-      const tf = r.timeframe as Timeframe;
-      const idx = r.slot_index as number;
-      const g: Goal = { timeframe: tf, slot_index: idx, title: r.title ?? "", done_at: r.done_at ?? null };
+    load();
+  }, [activeUser]);
 
-      if (tf === "weekly" && idx >= 0 && idx < 3) next[user].weekly[idx] = g;
-      if (tf === "monthly" && idx >= 0 && idx < 2) next[user].monthly[idx] = g;
-      if (tf === "yearly" && idx >= 0 && idx < 2) next[user].yearly[idx] = g;
+  const totalPoints = useMemo(() => {
+    let sum = 0;
+    for (const tf of ["weekly", "monthly", "yearly"] as Timeframe[]) {
+      for (let i = 0; i < SLOT_COUNTS[tf]; i++) {
+        const p = picksBySlot[pickKey(tf, i)];
+        if (!p) continue;
+        const t = tasksByKey[taskKey(p.player_id, tf, i)];
+        if (t?.done_at) sum += POINTS[tf];
+      }
     }
+    return sum;
+  }, [picksBySlot, tasksByKey]);
 
-    setTasksByUser(next);
-    setLoading(false);
+  const SlotCard = ({ tf, i, label }: { tf: Timeframe; i: number; label: string }) => {
+    const p = picksBySlot[pickKey(tf, i)];
+    const empty = !p;
+
+    const playerHandle = p?.player_id ?? "";
+    const playerName = playerHandle ? nameByHandle[playerHandle] ?? playerHandle : "Empty slot";
+    const avatar = playerHandle ? avatarByHandle[playerHandle] : null;
+
+    const task = p ? tasksByKey[taskKey(playerHandle, tf, i)] : null;
+    const title = task?.title ?? (empty ? "Draft a friend’s goal here" : `${tf} goal ${i + 1}`);
+    const done = !!task?.done_at;
+
+    return (
+      <div
+        className={[
+          "rounded-2xl border p-3 shadow-sm",
+          empty ? "border-slate-200 bg-white/70" : "border-slate-200 bg-white/90",
+        ].join(" ")}
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-bold uppercase tracking-wide text-slate-600">{label}</div>
+
+          {!empty && (
+            <div
+              className={[
+                "rounded-xl border px-3 py-1 text-xs font-bold",
+                done
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : "border-slate-200 bg-slate-50 text-slate-700",
+              ].join(" ")}
+              title={done ? "Completed" : "Not completed"}
+            >
+              {done ? `✓ +${POINTS[tf]} pts` : "Not done"}
+            </div>
+          )}
+        </div>
+
+        <div className="mt-2 flex items-center gap-3">
+          <Avatar src={avatar} alt={playerName} size={34} />
+          <div className="min-w-0">
+            <div className="text-sm font-bold text-slate-900">{playerName}</div>
+            <div className="text-xs text-slate-500">{empty ? "No player drafted" : `Player: ${playerHandle}`}</div>
+          </div>
+        </div>
+
+        <div
+          className={[
+            "mt-3 rounded-xl border px-3 py-2 text-sm font-semibold",
+            done ? "border-emerald-200 bg-emerald-50/40 text-slate-700" : "border-slate-200 bg-white text-slate-900",
+          ].join(" ")}
+        >
+          {title}
+        </div>
+
+        {empty && (
+          <div className="mt-2 text-xs text-slate-500">
+            (Later: add UI to choose which friend/goal occupies this slot.)
+          </div>
+        )}
+      </div>
+    );
   };
-
-  useEffect(() => {
-    loadTeamAndTasks(getActiveUser());
-    const handler = () => loadTeamAndTasks(getActiveUser());
-    window.addEventListener("fantasy-life:activeUserChanged", handler);
-    return () => window.removeEventListener("fantasy-life:activeUserChanged", handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    const channel = supabase
-      .channel("team-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, () => loadTeamAndTasks(getActiveUser()))
-      .on("postgres_changes", { event: "*", schema: "public", table: "team_picks" }, () => loadTeamAndTasks(getActiveUser()))
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const { weeklyDone, monthlyDone, yearlyDone } = useMemo(() => {
-    let w = 0, m = 0, y = 0;
-    team.weekly.forEach((playerId, idx) => {
-      const g = tasksByUser[playerId]?.weekly?.[idx];
-      if (g && isDoneNow("weekly", g.done_at)) w += 1;
-    });
-    team.monthly.forEach((playerId, idx) => {
-      const g = tasksByUser[playerId]?.monthly?.[idx];
-      if (g && isDoneNow("monthly", g.done_at)) m += 1;
-    });
-    team.yearly.forEach((playerId, idx) => {
-      const g = tasksByUser[playerId]?.yearly?.[idx];
-      if (g && isDoneNow("yearly", g.done_at)) y += 1;
-    });
-    return { weeklyDone: w, monthlyDone: m, yearlyDone: y };
-  }, [team, tasksByUser]);
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
-      <div className="mx-auto max-w-6xl px-5 py-8">
-        <h1 className="text-3xl font-bold tracking-tight">{activeUser.toUpperCase()}'s Team</h1>
-        <p className="mt-1 text-sm text-slate-600">{loading ? "Loading…" : "Read-only team view + points."}</p>
-
-        <div className="mt-6 grid gap-4 lg:grid-cols-[1fr_320px]">
-          <div className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="rounded-3xl bg-gradient-to-b from-emerald-700 to-emerald-600 p-5 shadow-inner">
-              <div className="relative rounded-3xl border border-white/30 p-5 min-h-[720px]">
-                <div className="pointer-events-none absolute inset-0 rounded-3xl">
-                  <div className="absolute top-1/2 left-0 w-full h-px -translate-y-1/2 bg-white/20" />
-                  <div className="absolute left-1/2 top-1/2 h-28 w-28 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/20" />
-                  <div className="absolute left-1/2 top-4 h-20 w-56 -translate-x-1/2 rounded-2xl border border-white/15" />
-                  <div className="absolute left-1/2 bottom-4 h-20 w-56 -translate-x-1/2 rounded-2xl border border-white/15" />
-                </div>
-
-                {!loading && (
-                  <div className="relative flex flex-col gap-6">
-                    <div>
-                      <div className="mb-2 text-center text-sm font-semibold text-white/95">Weekly (3)</div>
-                      <FieldRow>
-                        {team.weekly.map((playerId, idx) => {
-                          const g = tasksByUser[playerId]?.weekly?.[idx];
-                          return (
-                            <PlayerGoalCard
-                              key={`w-${idx}`}
-                              slotLabel={`W${idx + 1}`}
-                              playerId={playerId}
-                              goalTitle={g?.title ?? "(missing)"}
-                              doneNow={!!g && isDoneNow("weekly", g.done_at)}
-                            />
-                          );
-                        })}
-                      </FieldRow>
-                    </div>
-
-                    <div>
-                      <div className="mb-2 text-center text-sm font-semibold text-white/95">Monthly (2)</div>
-                      <FieldRow>
-                        {team.monthly.map((playerId, idx) => {
-                          const g = tasksByUser[playerId]?.monthly?.[idx];
-                          return (
-                            <PlayerGoalCard
-                              key={`m-${idx}`}
-                              slotLabel={`M${idx + 1}`}
-                              playerId={playerId}
-                              goalTitle={g?.title ?? "(missing)"}
-                              doneNow={!!g && isDoneNow("monthly", g.done_at)}
-                            />
-                          );
-                        })}
-                      </FieldRow>
-                    </div>
-
-                    <div>
-                      <div className="mb-2 text-center text-sm font-semibold text-white/95">Yearly (2)</div>
-                      <FieldRow>
-                        {team.yearly.map((playerId, idx) => {
-                          const g = tasksByUser[playerId]?.yearly?.[idx];
-                          return (
-                            <PlayerGoalCard
-                              key={`y-${idx}`}
-                              slotLabel={`Y${idx + 1}`}
-                              playerId={playerId}
-                              goalTitle={g?.title ?? "(missing)"}
-                              doneNow={!!g && isDoneNow("yearly", g.done_at)}
-                            />
-                          );
-                        })}
-                      </FieldRow>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
+      <div className="mx-auto max-w-5xl px-5 py-8">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold tracking-tight">My Team</h1>
+            <p className="mt-1 text-sm text-slate-600">Soccer-style lineup of your drafted goals.</p>
           </div>
 
-          <div className="lg:sticky lg:top-5 h-fit">
-            <PointsCard weeklyDone={weeklyDone} monthlyDone={monthlyDone} yearlyDone={yearlyDone} />
-            <div className="mt-3 rounded-2xl border border-slate-200 bg-white p-4 text-xs text-slate-600 shadow-sm">
-              Weekly/monthly reset automatically because we only count done_at in the current week/month.
+          <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+            <div className="text-right">
+              <div className="text-xs font-semibold text-slate-600">Manager</div>
+              <div className="text-sm font-bold text-slate-900">{managerName}</div>
             </div>
+            <Avatar src={avatarByHandle[activeUser]} alt={managerName} size={36} />
+            <div className="ml-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">
+              {totalPoints} pts
+            </div>
+          </div>
+        </div>
+
+        {/* NEW: Week + month banner */}
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm font-semibold text-slate-900">Today: {seasonClock.today}</div>
+            <div className="flex flex-wrap gap-2">
+              <span className="inline-flex items-center rounded-xl border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-bold text-sky-800">
+                {seasonClock.weekLabel} · {seasonClock.weekRange} · ends in {seasonClock.weekEndsIn}d
+              </span>
+              <span className="inline-flex items-center rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-800">
+                {seasonClock.monthLabel} · ends in {seasonClock.monthEndsIn}d
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {msg && (
+          <div className="mt-4 rounded-2xl border border-red-200 bg-white p-4 text-sm text-red-700">
+            {msg}
+          </div>
+        )}
+
+        <div className="mt-6 rounded-3xl border border-slate-200 bg-gradient-to-b from-emerald-50 to-sky-50 p-5 shadow-sm">
+          <div className="relative mx-auto max-w-3xl overflow-hidden rounded-3xl border border-emerald-200 bg-emerald-100/40 p-5">
+            {/* field lines */}
+            <div className="pointer-events-none absolute inset-0">
+              <div className="absolute left-0 right-0 top-1/2 h-[2px] bg-emerald-200/70" />
+              <div className="absolute left-1/2 top-1/2 h-28 w-28 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-emerald-200/70" />
+            </div>
+
+            {loading ? (
+              <div className="relative text-sm text-slate-600">Loading…</div>
+            ) : (
+              <div className="relative grid gap-4">
+                {/* Weekly row (3) */}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <SlotCard tf="weekly" i={0} label="Weekly 1" />
+                  <SlotCard tf="weekly" i={1} label="Weekly 2" />
+                  <SlotCard tf="weekly" i={2} label="Weekly 3" />
+                </div>
+
+                {/* Monthly row (2) */}
+                <div className="mx-auto grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
+                  <SlotCard tf="monthly" i={0} label="Monthly 1" />
+                  <SlotCard tf="monthly" i={1} label="Monthly 2" />
+                </div>
+
+                {/* Yearly row (2) */}
+                <div className="mx-auto grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
+                  <SlotCard tf="yearly" i={0} label="Yearly 1" />
+                  <SlotCard tf="yearly" i={1} label="Yearly 2" />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-3 text-xs text-slate-600">
+            Week ends Sunday night. Month ends on the last day of the month.
           </div>
         </div>
       </div>

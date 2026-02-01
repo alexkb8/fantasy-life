@@ -2,22 +2,31 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabase";
+import Avatar from "../components/Avatar";
 
-type UserId = "alex" | "bob" | "jeff" | "sean";
 type Timeframe = "weekly" | "monthly" | "yearly";
-
-type Goal = {
+type TaskRow = {
+  user_id: string; // handle
   timeframe: Timeframe;
   slot_index: number;
   title: string;
   done_at: string | null;
 };
 
-type TasksState = {
-  weekly: Goal[];  // 3
-  monthly: Goal[]; // 2
-  yearly: Goal[];  // 2
+type ProfileRow = {
+  handle: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
 };
+
+type UserId = "alex" | "bob" | "jeff" | "sean";
+
+const USERS: { id: UserId; name: string }[] = [
+  { id: "alex", name: "Alex" },
+  { id: "bob", name: "Bob" },
+  { id: "jeff", name: "Jeff" },
+  { id: "sean", name: "Sean" },
+];
 
 const ACTIVE_USER_KEY = "fantasy-life:activeUser";
 
@@ -28,313 +37,321 @@ function getActiveUser(): UserId {
   return "alex";
 }
 
-// -------- Time helpers (local time) --------
-function pad2(n: number) {
-  return n < 10 ? `0${n}` : `${n}`;
+const SLOT_COUNTS: Record<Timeframe, number> = { weekly: 3, monthly: 2, yearly: 2 };
+
+function slotKey(tf: Timeframe, i: number) {
+  return `${tf}:${i}`;
 }
-function isoWeekKey(d: Date) {
-  const date = new Date(d);
-  date.setHours(0, 0, 0, 0);
+
+/** ---- Time helpers (ISO week + week range + month range) ---- */
+function startOfDay(d: Date) {
+  const x = new Date(d);
+  x.setHours(0, 0, 0, 0);
+  return x;
+}
+function addDays(d: Date, n: number) {
+  const x = new Date(d);
+  x.setDate(x.getDate() + n);
+  return x;
+}
+function isoWeekStart(d: Date) {
+  const date = startOfDay(d);
+  const day = (date.getDay() + 6) % 7; // Mon=0..Sun=6
+  date.setDate(date.getDate() - day);
+  return date; // Monday
+}
+function isoWeekNumber(d: Date) {
+  const date = startOfDay(d);
+  // Move to Thursday of this week
   const day = ((date.getDay() + 6) % 7) + 1; // Mon=1..Sun=7
-  date.setDate(date.getDate() + (4 - day)); // move to Thursday
-  const year = date.getFullYear();
-  const yearStart = new Date(year, 0, 1);
-  yearStart.setHours(0, 0, 0, 0);
+  date.setDate(date.getDate() + (4 - day));
+  const yearStart = new Date(date.getFullYear(), 0, 1);
   const diffDays = Math.floor((date.getTime() - yearStart.getTime()) / 86400000);
-  const week = Math.floor(diffDays / 7) + 1;
-  return `${year}-W${pad2(week)}`;
+  return Math.floor(diffDays / 7) + 1;
 }
-function monthKey(d: Date) {
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+function daysLeftInclusive(endDate: Date) {
+  const today = startOfDay(new Date()).getTime();
+  const end = startOfDay(endDate).getTime();
+  const diff = Math.ceil((end - today) / 86400000);
+  return diff < 0 ? 0 : diff;
 }
-function yearKey(d: Date) {
-  return `${d.getFullYear()}`;
+function fmtShort(d: Date) {
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
-function currentPeriodKey(tf: Timeframe) {
-  const now = new Date();
-  if (tf === "weekly") return isoWeekKey(now);
-  if (tf === "monthly") return monthKey(now);
-  return yearKey(now);
-}
-function doneKey(tf: Timeframe, doneAt: string | null) {
-  if (!doneAt) return null;
-  const d = new Date(doneAt);
-  if (tf === "weekly") return isoWeekKey(d);
-  if (tf === "monthly") return monthKey(d);
-  return yearKey(d);
-}
-function isDoneNow(goal: Goal) {
-  return doneKey(goal.timeframe, goal.done_at) === currentPeriodKey(goal.timeframe);
-}
-
-// -------- UI --------
-function FieldRow(props: { children: React.ReactNode }) {
-  return <div className="flex w-full justify-center gap-4">{props.children}</div>;
-}
-
-function GoalCard(props: {
-  label: string;
-  goal: Goal;
-  doneNow: boolean;
-  onToggle: () => void;
-  onTitleChange: (title: string) => void;
-}) {
-  const { label, goal, doneNow, onToggle, onTitleChange } = props;
-
-  return (
-    <div className="w-full max-w-[260px]">
-      <div className="rounded-2xl border border-white/25 bg-white/10 p-3 shadow-sm backdrop-blur hover:bg-white/15 transition">
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-xs font-semibold tracking-wide text-white/90">{label}</div>
-          <label className="flex items-center gap-2 text-white/90">
-            <input type="checkbox" checked={doneNow} onChange={onToggle} className="h-4 w-4 accent-white" />
-            <span className="text-xs">{doneNow ? "Done" : "Not yet"}</span>
-          </label>
-        </div>
-
-        <input
-          value={goal.title}
-          onChange={(e) => onTitleChange(e.target.value)}
-          className="mt-2 w-full rounded-xl border border-white/25 bg-white/95 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-white/60"
-        />
-
-        <div className="mt-2 text-xs text-white/85">
-          {doneNow ? `✅ Completed this ${goal.timeframe}` : `⏳ Not completed this ${goal.timeframe}`}
-        </div>
-      </div>
-    </div>
-  );
+function fmtLong(d: Date) {
+  return d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
 }
 
 export default function TasksPage() {
   const [activeUser, setActiveUser] = useState<UserId>("alex");
+  const [tasks, setTasks] = useState<Record<string, TaskRow>>({});
+  const [nameByHandle, setNameByHandle] = useState<Record<string, string>>({});
+  const [avatarByHandle, setAvatarByHandle] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
-  const [lastError, setLastError] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string>("");
 
-  const blankFor = (user: UserId): TasksState => ({
-    weekly: Array.from({ length: 3 }, (_, i) => ({
-      timeframe: "weekly",
-      slot_index: i,
-      title: `${user.toUpperCase()}: Weekly goal ${i + 1}`,
-      done_at: null,
-    })),
-    monthly: Array.from({ length: 2 }, (_, i) => ({
-      timeframe: "monthly",
-      slot_index: i,
-      title: `${user.toUpperCase()}: Monthly goal ${i + 1}`,
-      done_at: null,
-    })),
-    yearly: Array.from({ length: 2 }, (_, i) => ({
-      timeframe: "yearly",
-      slot_index: i,
-      title: `${user.toUpperCase()}: Yearly goal ${i + 1}`,
-      done_at: null,
-    })),
-  });
+  useEffect(() => {
+    setActiveUser(getActiveUser());
 
-  const [tasks, setTasks] = useState<TasksState>(blankFor("alex"));
+    const onChange = () => setActiveUser(getActiveUser());
+    window.addEventListener("fantasy-life:activeUserChanged", onChange);
+    return () => window.removeEventListener("fantasy-life:activeUserChanged", onChange);
+  }, []);
 
-  const loadTasks = async (userId: UserId) => {
-    setLoading(true);
-    setActiveUser(userId);
-    setLastError(null);
+  const displayName = useMemo(() => {
+    return nameByHandle[activeUser] ?? USERS.find((u) => u.id === activeUser)?.name ?? activeUser;
+  }, [activeUser, nameByHandle]);
 
-    const { data, error } = await supabase
-      .from("tasks")
-      .select("timeframe, slot_index, title, done_at")
-      .eq("user_id", userId);
+  const seasonClock = useMemo(() => {
+    const now = new Date();
+    const wkNum = isoWeekNumber(now);
+    const wkStart = isoWeekStart(now);
+    const wkEnd = addDays(wkStart, 6);
 
-    const next = blankFor(userId);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0);
 
-    if (error) {
-      setLastError(`Load failed: ${error.message}`);
-      setTasks(next);
+    return {
+      today: fmtLong(now),
+      weekLabel: `Week ${wkNum}`,
+      weekRange: `${fmtShort(wkStart)} – ${fmtShort(wkEnd)}`,
+      weekEndsIn: daysLeftInclusive(wkEnd),
+      monthLabel: now.toLocaleDateString(undefined, { month: "long", year: "numeric" }),
+      monthRange: `${fmtShort(monthStart)} – ${fmtShort(monthEnd)}`,
+      monthEndsIn: daysLeftInclusive(monthEnd),
+    };
+  }, []);
+
+  useEffect(() => {
+    const load = async () => {
+      setLoading(true);
+      setMsg("");
+
+      // Load profiles map (handle -> name/avatar)
+      const profRes = await supabase.from("profiles").select("handle, display_name, avatar_url");
+      if (!profRes.error) {
+        const nb: Record<string, string> = {};
+        const ab: Record<string, string> = {};
+        for (const r of (profRes.data ?? []) as ProfileRow[]) {
+          if (!r.handle) continue;
+          nb[r.handle] = r.display_name || r.handle;
+          if (r.avatar_url) ab[r.handle] = r.avatar_url;
+        }
+        setNameByHandle(nb);
+        setAvatarByHandle(ab);
+      }
+
+      // Load tasks for active user
+      const tRes = await supabase
+        .from("tasks")
+        .select("user_id,timeframe,slot_index,title,done_at")
+        .eq("user_id", activeUser);
+
+      if (tRes.error) {
+        setMsg(tRes.error.message);
+        setLoading(false);
+        return;
+      }
+
+      const map: Record<string, TaskRow> = {};
+      for (const t of (tRes.data ?? []) as TaskRow[]) {
+        map[slotKey(t.timeframe, t.slot_index)] = t;
+      }
+
+      // Ensure slots exist client-side (so layout always shows)
+      (["weekly", "monthly", "yearly"] as Timeframe[]).forEach((tf) => {
+        for (let i = 0; i < SLOT_COUNTS[tf]; i++) {
+          const k = slotKey(tf, i);
+          if (!map[k]) {
+            map[k] = {
+              user_id: activeUser,
+              timeframe: tf,
+              slot_index: i,
+              title:
+                tf === "weekly"
+                  ? `Weekly goal ${i + 1}`
+                  : tf === "monthly"
+                  ? `Monthly goal ${i + 1}`
+                  : `Yearly goal ${i + 1}`,
+              done_at: null,
+            };
+          }
+        }
+      });
+
+      setTasks(map);
       setLoading(false);
-      return;
-    }
-
-    for (const row of (data ?? []) as any[]) {
-      const tf = row.timeframe as Timeframe;
-      const idx = row.slot_index as number;
-      const g: Goal = {
-        timeframe: tf,
-        slot_index: idx,
-        title: row.title ?? next[tf][idx]?.title ?? "",
-        done_at: row.done_at ?? null,
-      };
-
-      if (tf === "weekly" && idx >= 0 && idx < 3) next.weekly[idx] = g;
-      if (tf === "monthly" && idx >= 0 && idx < 2) next.monthly[idx] = g;
-      if (tf === "yearly" && idx >= 0 && idx < 2) next.yearly[idx] = g;
-    }
-
-    setTasks(next);
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    loadTasks(getActiveUser());
-    const handler = () => loadTasks(getActiveUser());
-    window.addEventListener("fantasy-life:activeUserChanged", handler);
-    return () => window.removeEventListener("fantasy-life:activeUserChanged", handler);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // realtime refresh
-  useEffect(() => {
-    const channel = supabase
-      .channel("tasks-realtime")
-      .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, () => loadTasks(getActiveUser()))
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
-  // Helper: get current goal from state
-  const getGoal = (tf: Timeframe, idx: number): Goal => {
-    if (tf === "weekly") return tasks.weekly[idx];
-    if (tf === "monthly") return tasks.monthly[idx];
-    return tasks.yearly[idx];
-  };
+    load();
+  }, [activeUser]);
 
-  // ✅ FIXED: Always upsert full row with NOT NULL title
-  const saveGoal = async (tf: Timeframe, idx: number, patch: Partial<Pick<Goal, "title" | "done_at">>) => {
-    setLastError(null);
-
-    const current = getGoal(tf, idx);
-    const nextGoal: Goal = {
-      ...current,
-      ...patch,
-      title: (patch.title ?? current.title ?? "").trim() || "Untitled goal",
-    };
+  const saveTaskTitle = async (tf: Timeframe, i: number, title: string) => {
+    const k = slotKey(tf, i);
+    const cur = tasks[k];
+    const next: TaskRow = { ...cur, title };
 
     // optimistic update
-    setTasks((prev) => {
-      const clone: TasksState = {
-        weekly: prev.weekly.map((g) => ({ ...g })),
-        monthly: prev.monthly.map((g) => ({ ...g })),
-        yearly: prev.yearly.map((g) => ({ ...g })),
-      };
-      if (tf === "weekly") clone.weekly[idx] = nextGoal;
-      if (tf === "monthly") clone.monthly[idx] = nextGoal;
-      if (tf === "yearly") clone.yearly[idx] = nextGoal;
-      return clone;
-    });
+    setTasks((prev) => ({ ...prev, [k]: next }));
 
-    const { error } = await supabase.from("tasks").upsert(
-      {
-        user_id: activeUser,
-        timeframe: tf,
-        slot_index: idx,
-        title: nextGoal.title,      // <-- ALWAYS include
-        done_at: nextGoal.done_at,  // <-- ALWAYS include
-      },
-      { onConflict: "user_id,timeframe,slot_index" }
-    );
+    const { error } = await supabase
+      .from("tasks")
+      .upsert(
+        { user_id: activeUser, timeframe: tf, slot_index: i, title, done_at: cur?.done_at ?? null },
+        { onConflict: "user_id,timeframe,slot_index" }
+      );
+
+    if (error) setMsg(error.message);
+  };
+
+  const toggleDone = async (tf: Timeframe, i: number) => {
+    const k = slotKey(tf, i);
+    const cur = tasks[k];
+    const newDoneAt = cur.done_at ? null : new Date().toISOString();
+
+    // optimistic update
+    setTasks((prev) => ({ ...prev, [k]: { ...cur, done_at: newDoneAt } }));
+
+    const { error } = await supabase
+      .from("tasks")
+      .upsert(
+        { user_id: activeUser, timeframe: tf, slot_index: i, title: cur.title, done_at: newDoneAt },
+        { onConflict: "user_id,timeframe,slot_index" }
+      );
 
     if (error) {
-      setLastError(`Save failed: ${error.message}`);
-      await loadTasks(activeUser); // revert to truth
+      // revert
+      setTasks((prev) => ({ ...prev, [k]: cur }));
+      setMsg(error.message);
     }
   };
 
-  const toggle = (tf: Timeframe, idx: number) => {
-    const g = getGoal(tf, idx);
-    const nowDone = isDoneNow(g);
-    saveGoal(tf, idx, { done_at: nowDone ? null : new Date().toISOString() });
-  };
+  const CheckCard = ({ tf, i, label }: { tf: Timeframe; i: number; label: string }) => {
+    const t = tasks[slotKey(tf, i)];
+    const done = !!t?.done_at;
 
-  const completed = useMemo(() => {
-    const all = [...tasks.weekly, ...tasks.monthly, ...tasks.yearly];
-    return all.filter((g) => isDoneNow(g)).length;
-  }, [tasks]);
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => toggleDone(tf, i)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") toggleDone(tf, i);
+        }}
+        className={[
+          "cursor-pointer select-none rounded-2xl border p-3 shadow-sm transition",
+          done
+            ? "border-emerald-200 bg-emerald-50/60"
+            : "border-slate-200 bg-white/90 hover:bg-slate-50",
+        ].join(" ")}
+        title="Click to toggle complete"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <div className="text-xs font-bold uppercase tracking-wide text-slate-600">{label}</div>
+
+          {/* big checkbox */}
+          <div
+            className={[
+              "flex h-9 w-9 items-center justify-center rounded-xl border text-lg font-black transition",
+              done
+                ? "border-emerald-300 bg-emerald-600 text-white"
+                : "border-slate-300 bg-white text-slate-300",
+            ].join(" ")}
+            aria-label={done ? "Completed" : "Not completed"}
+          >
+            {done ? "✓" : ""}
+          </div>
+        </div>
+
+        {/* Title input (clicking inside should NOT toggle done) */}
+        <input
+          value={t?.title ?? ""}
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+          onChange={(e) => saveTaskTitle(tf, i, e.target.value)}
+          className={[
+            "mt-2 w-full rounded-xl border px-3 py-2 text-sm font-semibold outline-none",
+            done ? "border-emerald-200 bg-white/60 text-slate-700" : "border-slate-200 bg-white text-slate-900",
+          ].join(" ")}
+        />
+      </div>
+    );
+  };
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-5xl px-5 py-8">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-3xl font-bold tracking-tight">{activeUser.toUpperCase()}'s Tasks</h1>
-            <p className="mt-1 text-sm text-slate-600">
-              {loading ? "Loading…" : <>Completed this period: <span className="font-semibold text-slate-900">{completed}</span> / 7</>}
-            </p>
-            {lastError && <p className="mt-1 text-sm text-red-600">{lastError}</p>}
+            <h1 className="text-3xl font-bold tracking-tight">My Tasks</h1>
+            <p className="mt-1 text-sm text-slate-600">Tap a card to check it off.</p>
           </div>
-          <div className="text-xs text-slate-500">
-            Week: <b>{currentPeriodKey("weekly")}</b> · Month: <b>{currentPeriodKey("monthly")}</b>
+
+          <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
+            <Avatar src={avatarByHandle[activeUser]} alt={displayName} size={36} />
+            <div className="text-sm font-bold text-slate-900">{displayName}</div>
+            <div className="text-xs text-slate-500">({activeUser})</div>
           </div>
         </div>
 
-        <div className="mt-6 rounded-3xl border border-slate-200 bg-white p-4 shadow-sm">
-          <div className="rounded-3xl bg-gradient-to-b from-emerald-700 to-emerald-600 p-5 shadow-inner">
-            <div className="relative rounded-3xl border border-white/30 p-5 min-h-[720px]">
-              <div className="pointer-events-none absolute inset-0 rounded-3xl">
-                <div className="absolute top-1/2 left-0 w-full h-px -translate-y-1/2 bg-white/20" />
-                <div className="absolute left-1/2 top-1/2 h-28 w-28 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/20" />
-                <div className="absolute left-1/2 top-4 h-20 w-56 -translate-x-1/2 rounded-2xl border border-white/15" />
-                <div className="absolute left-1/2 bottom-4 h-20 w-56 -translate-x-1/2 rounded-2xl border border-white/15" />
-              </div>
-
-              {!loading && (
-                <div className="relative flex flex-col gap-6">
-                  <div>
-                    <div className="mb-2 text-center text-sm font-semibold text-white/95">Weekly (3)</div>
-                    <FieldRow>
-                      {tasks.weekly.map((g, i) => (
-                        <GoalCard
-                          key={`w-${i}`}
-                          label={`W${i + 1}`}
-                          goal={g}
-                          doneNow={isDoneNow(g)}
-                          onToggle={() => toggle("weekly", i)}
-                          onTitleChange={(title) => saveGoal("weekly", i, { title })}
-                        />
-                      ))}
-                    </FieldRow>
-                  </div>
-
-                  <div>
-                    <div className="mb-2 text-center text-sm font-semibold text-white/95">Monthly (2)</div>
-                    <FieldRow>
-                      {tasks.monthly.map((g, i) => (
-                        <GoalCard
-                          key={`m-${i}`}
-                          label={`M${i + 1}`}
-                          goal={g}
-                          doneNow={isDoneNow(g)}
-                          onToggle={() => toggle("monthly", i)}
-                          onTitleChange={(title) => saveGoal("monthly", i, { title })}
-                        />
-                      ))}
-                    </FieldRow>
-                  </div>
-
-                  <div>
-                    <div className="mb-2 text-center text-sm font-semibold text-white/95">Yearly (2)</div>
-                    <FieldRow>
-                      {tasks.yearly.map((g, i) => (
-                        <GoalCard
-                          key={`y-${i}`}
-                          label={`Y${i + 1}`}
-                          goal={g}
-                          doneNow={isDoneNow(g)}
-                          onToggle={() => toggle("yearly", i)}
-                          onTitleChange={(title) => saveGoal("yearly", i, { title })}
-                        />
-                      ))}
-                    </FieldRow>
-                  </div>
-                </div>
-              )}
+        {/* NEW: Week + month banner */}
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="text-sm font-semibold text-slate-900">Today: {seasonClock.today}</div>
+            <div className="flex flex-wrap gap-2">
+              <span className="inline-flex items-center rounded-xl border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-bold text-sky-800">
+                {seasonClock.weekLabel} · {seasonClock.weekRange} · ends in {seasonClock.weekEndsIn}d
+              </span>
+              <span className="inline-flex items-center rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-800">
+                {seasonClock.monthLabel} · ends in {seasonClock.monthEndsIn}d
+              </span>
             </div>
           </div>
+        </div>
 
-          <p className="mt-4 text-xs text-slate-500">
-            Weekly/monthly “reset” automatically: completion counts only if done_at is in the current week/month.
-          </p>
+        {msg && (
+          <div className="mt-4 rounded-2xl border border-red-200 bg-white p-4 text-sm text-red-700">
+            {msg}
+          </div>
+        )}
+
+        <div className="mt-6 rounded-3xl border border-slate-200 bg-gradient-to-b from-emerald-50 to-sky-50 p-5 shadow-sm">
+          <div className="relative mx-auto max-w-3xl overflow-hidden rounded-3xl border border-emerald-200 bg-emerald-100/40 p-5">
+            {/* field lines */}
+            <div className="pointer-events-none absolute inset-0">
+              <div className="absolute left-0 right-0 top-1/2 h-[2px] bg-emerald-200/70" />
+              <div className="absolute left-1/2 top-1/2 h-28 w-28 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-emerald-200/70" />
+            </div>
+
+            {loading ? (
+              <div className="relative text-sm text-slate-600">Loading…</div>
+            ) : (
+              <div className="relative grid gap-4">
+                {/* Weekly row */}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <CheckCard tf="weekly" i={0} label="Weekly 1" />
+                  <CheckCard tf="weekly" i={1} label="Weekly 2" />
+                  <CheckCard tf="weekly" i={2} label="Weekly 3" />
+                </div>
+
+                {/* Monthly row */}
+                <div className="mx-auto grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
+                  <CheckCard tf="monthly" i={0} label="Monthly 1" />
+                  <CheckCard tf="monthly" i={1} label="Monthly 2" />
+                </div>
+
+                {/* Yearly row */}
+                <div className="mx-auto grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
+                  <CheckCard tf="yearly" i={0} label="Yearly 1" />
+                  <CheckCard tf="yearly" i={1} label="Yearly 2" />
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-3 text-xs text-slate-600">
+            Week ends Sunday night. Month ends on the last day of the month.
+          </div>
         </div>
       </div>
     </main>

@@ -2,11 +2,12 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabase";
+import Avatar from "../components/Avatar";
 
 type Timeframe = "weekly" | "monthly" | "yearly";
 
 type TaskRow = {
-  user_id: string;
+  user_id: string; // handle
   timeframe: Timeframe;
   slot_index: number;
   title: string;
@@ -14,10 +15,16 @@ type TaskRow = {
 };
 
 type PickRow = {
-  manager_id: string;
+  manager_id: string; // handle
   timeframe: Timeframe;
   slot_index: number;
-  player_id: string;
+  player_id: string; // handle
+};
+
+type ProfileRow = {
+  handle: string | null;
+  display_name: string | null;
+  avatar_url: string | null;
 };
 
 const POINTS: Record<Timeframe, number> = { weekly: 1, monthly: 4, yearly: 40 };
@@ -79,12 +86,12 @@ function seededIndex(seed: string, length: number) {
   return Math.abs(h) % length;
 }
 
-function fallbackNameFromId(id: string) {
-  if (!id) return "Someone";
-  return id.charAt(0).toUpperCase() + id.slice(1);
+function fallbackNameFromHandle(handle: string) {
+  if (!handle) return "Someone";
+  return handle.charAt(0).toUpperCase() + handle.slice(1);
 }
 
-type RankingRow = { id: string; points: number };
+type RankingRow = { id: string; points: number }; // id = handle
 type TotalRankingRow = { id: string; totalPoints: number; weekDelta: number };
 
 type WeeklyPost = {
@@ -107,7 +114,9 @@ export default function FeedPage() {
   const [loading, setLoading] = useState(true);
   const [posts, setPosts] = useState<WeeklyPost[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [nameById, setNameById] = useState<Record<string, string>>({});
+
+  const [nameByHandle, setNameByHandle] = useState<Record<string, string>>({});
+  const [avatarByHandle, setAvatarByHandle] = useState<Record<string, string>>({});
 
   const todayLabel = useMemo(() => {
     return new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
@@ -118,6 +127,21 @@ export default function FeedPage() {
       setLoading(true);
       setErrorMsg(null);
 
+      // Load profiles keyed by handle
+      const profRes = await supabase.from("profiles").select("handle, display_name, avatar_url");
+      const nb: Record<string, string> = {};
+      const ab: Record<string, string> = {};
+      if (!profRes.error) {
+        for (const r of (profRes.data ?? []) as ProfileRow[]) {
+          if (!r.handle) continue;
+          nb[r.handle] = r.display_name || r.handle;
+          if (r.avatar_url) ab[r.handle] = r.avatar_url;
+        }
+      }
+      setNameByHandle(nb);
+      setAvatarByHandle(ab);
+
+      // Load tasks + picks
       const [tasksRes, picksRes] = await Promise.all([
         supabase.from("tasks").select("user_id,timeframe,slot_index,title,done_at"),
         supabase.from("team_picks").select("manager_id,timeframe,slot_index,player_id"),
@@ -137,39 +161,21 @@ export default function FeedPage() {
       const tasks = (tasksRes.data ?? []) as TaskRow[];
       const picks = (picksRes.data ?? []) as PickRow[];
 
-      // Discover users dynamically
+      // discover handles
       const userSet = new Set<string>();
       for (const t of tasks) userSet.add(t.user_id);
       for (const p of picks) {
         userSet.add(p.manager_id);
         userSet.add(p.player_id);
       }
-      const allUserIds = Array.from(userSet);
+      const allHandles = Array.from(userSet);
 
-      // Default names
-      const nextNameById: Record<string, string> = {};
-      for (const id of allUserIds) nextNameById[id] = fallbackNameFromId(id);
-
-      // Optional: profiles table support (safe if it doesn't exist)
-      try {
-        const profRes = await supabase.from("profiles").select("id, display_name").in("id", allUserIds);
-        if (!profRes.error && profRes.data) {
-          for (const row of profRes.data as any[]) {
-            if (row?.id && row?.display_name) {
-              nextNameById[String(row.id)] = String(row.display_name);
-            }
-          }
-        }
-      } catch {}
-
-      setNameById(nextNameById);
-
-      // Determine managers (ranking list)
+      // managers
       const managerSet = new Set<string>();
       for (const p of picks) managerSet.add(p.manager_id);
-      const managerIds = Array.from(managerSet);
+      const managerHandles = Array.from(managerSet);
 
-      // Week set from done_at plus current week
+      // weeks
       const weekSet = new Set<string>();
       weekSet.add(isoWeekKey(new Date()));
       for (const t of tasks) if (t.done_at) weekSet.add(isoWeekKey(new Date(t.done_at)));
@@ -180,14 +186,14 @@ export default function FeedPage() {
       );
       const feedWeeks = weekKeys.slice(0, HISTORY_WEEKS);
 
-      // Index task completion week by (user,timeframe,slot)
-      const taskKey = (userId: string, tf: Timeframe, slot: number) => `${userId}|${tf}|${slot}`;
+      // task completion by key
+      const taskKey = (u: string, tf: Timeframe, slot: number) => `${u}|${tf}|${slot}`;
       const doneWeekByTaskKey = new Map<string, string | null>();
       for (const t of tasks) {
         doneWeekByTaskKey.set(taskKey(t.user_id, t.timeframe, t.slot_index), t.done_at ? isoWeekKey(new Date(t.done_at)) : null);
       }
 
-      // Completed tasks + user points by week (for MVP/LVP)
+      // Completed tasks by week + user points by week
       const completedTasksByWeek = new Map<string, TaskRow[]>();
       const userPointsByWeek = new Map<string, Map<string, number>>();
       for (const wk of feedWeeks) {
@@ -205,24 +211,23 @@ export default function FeedPage() {
         m.set(t.user_id, (m.get(t.user_id) ?? 0) + POINTS[t.timeframe]);
       }
 
-      // Manager points by week
+      // manager points by week
       const managerPointsByWeek = new Map<string, Map<string, number>>();
       for (const wk of feedWeeks) managerPointsByWeek.set(wk, new Map<string, number>());
 
       for (const p of picks) {
-        const draftedDoneWeek = doneWeekByTaskKey.get(taskKey(p.player_id, p.timeframe, p.slot_index)) ?? null;
-        if (!draftedDoneWeek) continue;
-        if (!managerPointsByWeek.has(draftedDoneWeek)) continue;
+        const doneWk = doneWeekByTaskKey.get(taskKey(p.player_id, p.timeframe, p.slot_index)) ?? null;
+        if (!doneWk) continue;
+        if (!managerPointsByWeek.has(doneWk)) continue;
 
-        const m = managerPointsByWeek.get(draftedDoneWeek)!;
+        const m = managerPointsByWeek.get(doneWk)!;
         m.set(p.manager_id, (m.get(p.manager_id) ?? 0) + POINTS[p.timeframe]);
       }
 
-      // Cumulative manager points up to each week (chronological)
+      // cumulative manager points up to each week
       const chronoWeeks = [...feedWeeks].sort(
         (a, b) => weekKeyToStart(a).getTime() - weekKeyToStart(b).getTime()
       );
-
       const runningTotals = new Map<string, number>();
       const cumulativeByWeek = new Map<string, Map<string, number>>();
 
@@ -238,7 +243,7 @@ export default function FeedPage() {
         const weekMap = managerPointsByWeek.get(wk) ?? new Map<string, number>();
         const cumMap = cumulativeByWeek.get(wk) ?? new Map<string, number>();
 
-        const rows: TotalRankingRow[] = managerIds.map((id) => ({
+        const rows: TotalRankingRow[] = managerHandles.map((id) => ({
           id,
           weekDelta: weekMap.get(id) ?? 0,
           totalPoints: cumMap.get(id) ?? 0,
@@ -250,23 +255,20 @@ export default function FeedPage() {
 
       const toMvpLvp = (wk: string): { mvp: RankingRow; lvp: RankingRow } => {
         const up = userPointsByWeek.get(wk) ?? new Map<string, number>();
-
-        // include all users to avoid empty issues
-        for (const uid of allUserIds) if (!up.has(uid)) up.set(uid, 0);
+        for (const h of allHandles) if (!up.has(h)) up.set(h, 0);
 
         const arr: RankingRow[] = Array.from(up.entries()).map(([id, points]) => ({ id, points }));
-        // MVP: points desc, then id asc
+
         arr.sort((a, b) => b.points - a.points || a.id.localeCompare(b.id));
         const mvp = arr[0] ?? { id: "someone", points: 0 };
 
-        // LVP: points asc, then id asc (deterministic)
         const lvpArr = [...arr].sort((a, b) => a.points - b.points || a.id.localeCompare(b.id));
         const lvp = lvpArr[0] ?? { id: "someone", points: 0 };
 
         return { mvp, lvp };
       };
 
-      // Build weekly posts
+      // Build posts
       const built: WeeklyPost[] = feedWeeks.map((wk) => {
         const start = weekKeyToStart(wk);
         const mondayLabel = start.toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" });
@@ -275,7 +277,6 @@ export default function FeedPage() {
         const completedPick =
           completedList.length > 0 ? completedList[seededIndex(`completed|${wk}`, completedList.length)] : null;
 
-        // Choose a task NOT completed in that week (stable)
         const notDonePick = (() => {
           if (tasks.length === 0) return null;
           const base = seededIndex(`notdone|${wk}`, tasks.length);
@@ -289,11 +290,11 @@ export default function FeedPage() {
         })();
 
         const completedLine = completedPick
-          ? `${nextNameById[completedPick.user_id] ?? fallbackNameFromId(completedPick.user_id)} did ${completedPick.title}`
+          ? `${nb[completedPick.user_id] ?? fallbackNameFromHandle(completedPick.user_id)} did ${completedPick.title}`
           : `Someone did something`;
 
         const notDoneLine = notDonePick
-          ? `${nextNameById[notDonePick.user_id] ?? fallbackNameFromId(notDonePick.user_id)} did not ${notDonePick.title}`
+          ? `${nb[notDonePick.user_id] ?? fallbackNameFromHandle(notDonePick.user_id)} did not ${notDonePick.title}`
           : `Someone did not something`;
 
         const text = `${mondayLabel}: This week, ${completedLine} ...wow. ${notDoneLine}.`;
@@ -318,7 +319,7 @@ export default function FeedPage() {
     run();
   }, [todayLabel]);
 
-  const showName = (id: string) => nameById[id] ?? fallbackNameFromId(id);
+  const showName = (h: string) => nameByHandle[h] ?? fallbackNameFromHandle(h);
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
@@ -348,17 +349,19 @@ export default function FeedPage() {
                 <div className="mt-4 grid gap-3 sm:grid-cols-3">
                   <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
                     <div className="text-xs font-semibold text-slate-600">MVP (this week)</div>
-                    <div className="mt-1 text-sm font-bold text-slate-900">
-                      {showName(p.mvp.id)} — {p.mvp.points} pts
+                    <div className="mt-2 flex items-center gap-2">
+                      <Avatar src={avatarByHandle[p.mvp.id]} alt={showName(p.mvp.id)} size={30} />
+                      <div className="text-sm font-bold text-slate-900">
+                        {showName(p.mvp.id)} — {p.mvp.points} pts
+                      </div>
                     </div>
 
                     <div className="mt-3 text-xs font-semibold text-slate-600">LVP (this week)</div>
-                    <div className="mt-1 text-sm font-bold text-slate-900">
-                      {showName(p.lvp.id)} — {p.lvp.points} pts
-                    </div>
-
-                    <div className="mt-2 text-[11px] text-slate-500">
-                      (Later: quarterly “LVP punishment” is easy to add by aggregating these week scores.)
+                    <div className="mt-2 flex items-center gap-2">
+                      <Avatar src={avatarByHandle[p.lvp.id]} alt={showName(p.lvp.id)} size={30} />
+                      <div className="text-sm font-bold text-slate-900">
+                        {showName(p.lvp.id)} — {p.lvp.points} pts
+                      </div>
                     </div>
                   </div>
 
@@ -375,13 +378,10 @@ export default function FeedPage() {
                           className="flex items-center justify-between rounded-xl border border-slate-200 bg-white px-3 py-2"
                         >
                           <div className="flex items-center gap-3">
-                            <span
-                              className={`inline-flex items-center rounded-lg border px-2 py-1 text-xs font-bold ${badgeClasses(
-                                i
-                              )}`}
-                            >
+                            <span className={`inline-flex items-center rounded-lg border px-2 py-1 text-xs font-bold ${badgeClasses(i)}`}>
                               #{i + 1}
                             </span>
+                            <Avatar src={avatarByHandle[r.id]} alt={showName(r.id)} size={28} />
                             <span className="text-sm font-semibold text-slate-900">{showName(r.id)}</span>
                           </div>
 
@@ -415,7 +415,7 @@ export default function FeedPage() {
                 </div>
 
                 <div className="mt-3 text-xs text-slate-500">
-                  Note: goals only count for the week their <code>done_at</code> timestamp occurred (yearly goals included).
+                  Note: goals only count for the week their <code>done_at</code> timestamp occurred.
                 </div>
               </div>
             ))}
