@@ -2,9 +2,6 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
-import { usePathname, useRouter } from "next/navigation";
-import { supabase } from "../../lib/supabase";
-
 
 type UserId = "alex" | "bob" | "jeff" | "sean";
 
@@ -25,26 +22,10 @@ function getActiveUser(): UserId {
 }
 
 export default function Nav() {
-  const pathname = usePathname();
-  const router = useRouter();
-
   const [activeUser, setActiveUser] = useState<UserId>("alex");
-  const [isAuthed, setIsAuthed] = useState(false);
 
   useEffect(() => {
-    // init user selector
     setActiveUser(getActiveUser());
-
-    // init auth state
-    supabase.auth.getSession().then(({ data }) => setIsAuthed(!!data.session));
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      setIsAuthed(!!session);
-    });
-
-    return () => {
-      sub.subscription.unsubscribe();
-    };
   }, []);
 
   const onChangeUser = (next: UserId) => {
@@ -52,22 +33,7 @@ export default function Nav() {
     try {
       localStorage.setItem(ACTIVE_USER_KEY, next);
     } catch {}
-
-    // Notify pages to reload their state
     window.dispatchEvent(new Event("fantasy-life:activeUserChanged"));
-  };
-
-  const onLogout = async () => {
-    await supabase.auth.signOut();
-    router.push("/login");
-  };
-
-  const linkClass = (href: string) => {
-    const active = pathname === href;
-    return [
-      "text-sm font-semibold transition",
-      active ? "text-slate-900 border-b-2 border-slate-900 pb-1" : "text-slate-600 hover:text-slate-900",
-    ].join(" ");
   };
 
   return (
@@ -78,25 +44,24 @@ export default function Nav() {
             fantasy-life
           </Link>
 
-          <Link href="/tasks" className={linkClass("/tasks")}>
+          <Link href="/draft" className="text-sm font-semibold text-slate-700 hover:text-slate-900">
+            Draft
+          </Link>
+          <Link href="/tasks" className="text-sm font-semibold text-slate-700 hover:text-slate-900">
             My Tasks
           </Link>
-
-          <Link href="/team" className={linkClass("/team")}>
+          <Link href="/team" className="text-sm font-semibold text-slate-700 hover:text-slate-900">
             My Team
           </Link>
-
-          <Link href="/feed" className={linkClass("/feed")}>
+          <Link href="/feed" className="text-sm font-semibold text-slate-700 hover:text-slate-900">
             Feed
           </Link>
-
-          <Link href="/profile" className={linkClass("/profile")}>
+          <Link href="/profile" className="text-sm font-semibold text-slate-700 hover:text-slate-900">
             Profile
           </Link>
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Keep your MVP user selector for now */}
           <span className="text-sm font-semibold text-slate-600">User</span>
           <select
             value={activeUser}
@@ -109,23 +74,6 @@ export default function Nav() {
               </option>
             ))}
           </select>
-
-          {/* Auth button */}
-          {isAuthed ? (
-            <button
-              onClick={onLogout}
-              className="ml-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:text-slate-900"
-            >
-              Log out
-            </button>
-          ) : (
-            <Link
-              href="/login"
-              className="ml-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 shadow-sm hover:text-slate-900"
-            >
-              Sign in
-            </Link>
-          )}
         </div>
       </div>
     </nav>
