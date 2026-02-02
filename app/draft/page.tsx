@@ -2,8 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../../lib/supabase";
+import type { Timeframe } from "../../lib/timeframeTheme";
+import {
+  TimeframePill,
+  timeframeButtonClass,
+  timeframeCardClass,
+  timeframePanelClass,
+} from "../components/TimeframeUI";
 
-type Timeframe = "weekly" | "monthly" | "yearly";
 const LEAGUE_ID = "default";
 const ACTIVE_USER_KEY = "fantasy-life:activeUser";
 
@@ -58,12 +64,6 @@ function fmtSeconds(ms: number) {
   return Math.ceil(ms / 1000);
 }
 
-function tfLabel(tf: Timeframe) {
-  if (tf === "weekly") return "Weekly";
-  if (tf === "monthly") return "Monthly";
-  return "Yearly";
-}
-
 function taskKey(t: TaskRow) {
   return `${t.user_id}|${t.timeframe}|${t.slot_index}`;
 }
@@ -74,37 +74,6 @@ function dpKey(p: DraftPick) {
 function lookupGoalTitle(tasks: TaskRow[], draftedUserId: string, tf: Timeframe, slotIndex: number) {
   const match = tasks.find((t) => t.user_id === draftedUserId && t.timeframe === tf && t.slot_index === slotIndex);
   return match?.title ?? `(goal slot ${slotIndex + 1})`;
-}
-
-function theme(tf: Timeframe) {
-  if (tf === "weekly") {
-    return {
-      badge: "border-sky-200 bg-sky-50 text-sky-900",
-      panel: "border-sky-200 bg-sky-50/60",
-      dot: "bg-sky-600",
-      ringBase: "ring-2 ring-sky-200", // constant thickness
-      ringHover: "hover:ring-sky-300", // only color changes
-      btn: "border-sky-200 bg-sky-50 text-sky-900 hover:bg-sky-100",
-    };
-  }
-  if (tf === "monthly") {
-    return {
-      badge: "border-indigo-200 bg-indigo-50 text-indigo-900",
-      panel: "border-indigo-200 bg-indigo-50/60",
-      dot: "bg-indigo-600",
-      ringBase: "ring-2 ring-indigo-200",
-      ringHover: "hover:ring-indigo-300",
-      btn: "border-indigo-200 bg-indigo-50 text-indigo-900 hover:bg-indigo-100",
-    };
-  }
-  return {
-    badge: "border-emerald-200 bg-emerald-50 text-emerald-900",
-    panel: "border-emerald-200 bg-emerald-50/60",
-    dot: "bg-emerald-600",
-    ringBase: "ring-2 ring-emerald-200",
-    ringHover: "hover:ring-emerald-300",
-    btn: "border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100",
-  };
 }
 
 export default function DraftPage() {
@@ -119,10 +88,10 @@ export default function DraftPage() {
   const [statusMsg, setStatusMsg] = useState("");
   const [pending, setPending] = useState<null | "start" | "autopick" | "pick">(null);
 
-  // local countdown tick (kept, but stable scroll restoration handles rerenders)
+  // countdown tick (slower to reduce rerenders)
   const [nowTick, setNowTick] = useState<number>(Date.now());
   useEffect(() => {
-    const id = setInterval(() => setNowTick(Date.now()), 500); // slightly slower -> fewer rerenders
+    const id = setInterval(() => setNowTick(Date.now()), 750);
     return () => clearInterval(id);
   }, []);
 
@@ -183,7 +152,7 @@ export default function DraftPage() {
     }
   };
 
-  // ---- Realtime subscriptions (no polling) ----
+  // ---- Realtime subscriptions ----
   useEffect(() => {
     let cancelled = false;
 
@@ -251,17 +220,13 @@ export default function DraftPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Restore draft order scroll position after rerenders that change rows
+  // Restore draft order scroll position after rerenders
   useEffect(() => {
     const el = draftOrderScrollEl.current;
     if (!el) return;
     const desired = draftOrderScrollTop.current;
-
-    // wait for DOM paint before restoring
     requestAnimationFrame(() => {
-      if (draftOrderScrollEl.current) {
-        draftOrderScrollEl.current.scrollTop = desired;
-      }
+      if (draftOrderScrollEl.current) draftOrderScrollEl.current.scrollTop = desired;
     });
   }, [picks.length, members.length, state?.pick_number, state?.status, nowTick]);
 
@@ -295,7 +260,9 @@ export default function DraftPage() {
     for (const t of eligible) groups[t.timeframe].push(t);
 
     (Object.keys(groups) as Timeframe[]).forEach((tf) => {
-      groups[tf].sort((a, b) => (a.user_id !== b.user_id ? a.user_id.localeCompare(b.user_id) : a.slot_index - b.slot_index));
+      groups[tf].sort((a, b) =>
+        a.user_id !== b.user_id ? a.user_id.localeCompare(b.user_id) : a.slot_index - b.slot_index
+      );
     });
 
     return groups;
@@ -348,7 +315,6 @@ export default function DraftPage() {
   // ---- RPC calls ----
   const callRpc = async (label: typeof pending, fn: () => Promise<{ error: any }>, okMsg: string) => {
     setErr("");
-    setStatusMsg("");
     setPending(label);
     try {
       const { error } = await fn();
@@ -373,8 +339,6 @@ export default function DraftPage() {
 
   const pickTask = async (t: TaskRow) => {
     setErr("");
-    setStatusMsg("");
-
     if (draftedSet.has(taskKey(t))) {
       setStatusMsg("That goal is already drafted.");
       return;
@@ -387,10 +351,12 @@ export default function DraftPage() {
       setStatusMsg(`Draft is ${state.status}. Click Start.`);
       return;
     }
-    if (pending) return;
-
+    if (pending) {
+      setStatusMsg("Please wait…");
+      return;
+    }
     if (currentManager !== activeUser) {
-      setStatusMsg(`Not your turn — on the clock: ${currentManager ?? "—"}. (Switch user in Nav to test.)`);
+      setStatusMsg(`Not your turn — on the clock: ${currentManager ?? "—"}.`);
       return;
     }
 
@@ -407,34 +373,23 @@ export default function DraftPage() {
     );
   };
 
-  // ---- UI components ----
   function DraftSection({ tf, items }: { tf: Timeframe; items: TaskRow[] }) {
-    const th = theme(tf);
-
     return (
-      <div className={"rounded-3xl border p-4 " + th.panel}>
+      <div className={"rounded-3xl border p-4 " + timeframePanelClass(tf)}>
         <div className="flex items-center justify-between">
-          <div className="text-lg font-black text-slate-900">{tfLabel(tf)}</div>
-          <span className={"rounded-xl border px-3 py-1 text-xs font-bold " + th.badge}>
-            {items.length}
-          </span>
+          <div className="text-lg font-black text-slate-900">{tf === "yearly" ? "Yearly Goals ✨" : tf === "monthly" ? "Monthly" : "Weekly"}</div>
+          <TimeframePill tf={tf} />
         </div>
 
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           {items.map((t) => {
             const drafted = draftedSet.has(taskKey(t));
-            const disablePick = drafted || pending !== null;
+            const pickInFlight = pending === "pick";
+            const disablePick = drafted || pickInFlight;
 
-            // FIXED: constant ring thickness; only shadow changes on hover -> no flicker
             const cardClass =
               "rounded-2xl border p-4 transition " +
-              (drafted
-                ? "border-slate-200 bg-white/40 opacity-60"
-                : "border-slate-200 bg-white ring-2 " +
-                  th.ringBase +
-                  " " +
-                  th.ringHover +
-                  " hover:shadow-md");
+              (drafted ? "border-slate-200 bg-white/40 opacity-60" : timeframeCardClass(tf));
 
             return (
               <div key={taskKey(t)} className={cardClass}>
@@ -442,9 +397,7 @@ export default function DraftPage() {
                   <div className="text-sm font-black text-slate-900">
                     {t.user_id} — Goal {t.slot_index + 1}
                   </div>
-                  <span className={"rounded-lg border px-2 py-1 text-xs font-bold " + th.badge}>
-                    {t.timeframe}
-                  </span>
+                  <TimeframePill tf={t.timeframe} />
                 </div>
 
                 <div className="mt-2 text-sm font-semibold text-slate-800">{t.title}</div>
@@ -460,10 +413,10 @@ export default function DraftPage() {
                       "rounded-xl border px-3 py-2 text-sm font-black shadow-sm " +
                       (disablePick
                         ? "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-500"
-                        : th.btn)
+                        : timeframeButtonClass(tf))
                     }
                   >
-                    {drafted ? "Picked" : pending === "pick" ? "Picking…" : "Pick"}
+                    {drafted ? "Picked" : pickInFlight ? "Picking…" : "Pick"}
                   </button>
                 </div>
               </div>
@@ -498,13 +451,12 @@ export default function DraftPage() {
           <div className="text-xs text-slate-600">Scroll to see all picks</div>
         </div>
 
-        {/* FIXED: stable fixed height + scrollTop persistence */}
         <div
           ref={draftOrderScrollEl}
           onScroll={(e) => {
             draftOrderScrollTop.current = (e.currentTarget as HTMLDivElement).scrollTop;
           }}
-          className="h-[460px] overflow-auto"
+          className="h-[520px] overflow-auto"
         >
           <table className="w-full text-left text-xs">
             <thead className="border-t border-slate-200 bg-white font-bold uppercase text-slate-600">
@@ -552,14 +504,11 @@ export default function DraftPage() {
       tf: Timeframe;
       rows: { timeframe: Timeframe; roster_slot_index: number; filled: boolean; player_id: string | null; goal_title: string | null }[];
     }) => {
-      const th = theme(tf);
       return (
-        <div className={"rounded-2xl border p-3 " + th.panel}>
+        <div className={"rounded-2xl border p-3 " + timeframePanelClass(tf)}>
           <div className="flex items-center justify-between">
-            <div className="text-sm font-black text-slate-900">{tfLabel(tf)}</div>
-            <span className={"rounded-lg border px-2 py-1 text-xs font-bold " + th.badge}>
-              {SLOT_COUNTS[tf]}
-            </span>
+            <div className="text-sm font-black text-slate-900">{tf === "yearly" ? "Yearly ✨" : tf === "monthly" ? "Monthly" : "Weekly"}</div>
+            <TimeframePill tf={tf} />
           </div>
 
           <div className="mt-2 grid gap-2">
@@ -570,14 +519,12 @@ export default function DraftPage() {
               >
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 text-xs font-semibold">
-                    <div className={"h-2.5 w-2.5 rounded-full " + (s.filled ? th.dot : "bg-slate-300")} />
-                    <span className={s.filled ? "text-slate-900" : "text-slate-500"}>
-                      {tfLabel(tf)} {s.roster_slot_index + 1}
+                    <span className="text-slate-600">{s.filled ? "FILLED" : "OPEN"}</span>
+                    <span className="text-slate-900">
+                      {tf === "weekly" ? "W" : tf === "monthly" ? "M" : "Y"}{s.roster_slot_index + 1}
                     </span>
                   </div>
-                  <div className="truncate text-right text-xs font-black text-slate-900">
-                    {s.filled ? s.player_id : "OPEN"}
-                  </div>
+                  <div className="truncate text-right text-xs font-black text-slate-900">{s.filled ? s.player_id : "—"}</div>
                 </div>
                 <div className="mt-1 line-clamp-2 text-[11px] text-slate-600">
                   {s.filled ? s.goal_title : "Pick a goal in this category."}
@@ -599,7 +546,7 @@ export default function DraftPage() {
               Remaining:{" "}
               <span className="font-bold text-sky-700">{remainingSlots.weekly}W</span>{" "}
               <span className="font-bold text-indigo-700">{remainingSlots.monthly}M</span>{" "}
-              <span className="font-bold text-emerald-700">{remainingSlots.yearly}Y</span>
+              <span className="font-bold text-amber-800">{remainingSlots.yearly}Y</span>
             </div>
           </div>
 
@@ -660,7 +607,6 @@ export default function DraftPage() {
           </button>
         </div>
 
-        {/* ✅ Under My roster */}
         <DraftOrderCompact />
       </div>
     );

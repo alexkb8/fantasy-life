@@ -3,8 +3,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "../../lib/supabase";
 import Avatar from "../components/Avatar";
+import type { Timeframe } from "../../lib/timeframeTheme";
+import { tfLabel } from "../../lib/timeframeTheme";
+import {
+  TimeframePill,
+  TimeframeDot,
+  timeframePanelClass,
+  timeframeAccentTextClass,
+} from "../components/TimeframeUI";
 
-type Timeframe = "weekly" | "monthly" | "yearly";
 const POINTS: Record<Timeframe, number> = { weekly: 1, monthly: 4, yearly: 40 };
 const SLOT_COUNTS: Record<Timeframe, number> = { weekly: 3, monthly: 2, yearly: 2 };
 
@@ -35,10 +42,6 @@ function pickKey(tf: Timeframe, i: number) {
 }
 function taskKey(u: string, tf: Timeframe, i: number) {
   return `${u}|${tf}|${i}`;
-}
-function slotLabel(tf: Timeframe, i: number) {
-  const base = tf === "weekly" ? "Weekly" : tf === "monthly" ? "Monthly" : "Yearly";
-  return `${base} ${i + 1}`;
 }
 
 /** time helpers */
@@ -79,7 +82,7 @@ function fmtLong(d: Date) {
   return d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
 }
 
-/** Perfect-count helpers (used only for rate calc; not displayed) */
+/** Perfect-count helpers (rate calc for YTD bar) */
 function weeksElapsedYTD(now = new Date()) {
   return isoWeekNumber(now);
 }
@@ -103,7 +106,6 @@ type TeamHistoryRow = CompletionRow & {
 type SlotStat = {
   timeframe: Timeframe;
   slot_index: number;
-  label: string;
 
   playerHandle: string | null;
   playerName: string;
@@ -111,12 +113,17 @@ type SlotStat = {
 
   taskTitle: string;
 
-  completions: number; // for internal calc + tooltip
-  perfect: number;     // for internal calc + tooltip
+  completions: number;
+  perfect: number;
   completionRate: number;
 
-  points: number;      // show this
+  points: number;
 };
+
+function clampPct(x: number) {
+  if (isNaN(x) || !isFinite(x)) return 0;
+  return Math.max(0, Math.min(100, Math.round(x)));
+}
 
 export default function TeamPage() {
   const [activeUser, setActiveUser] = useState<UserId>("alex");
@@ -174,6 +181,13 @@ export default function TeamPage() {
     const now = new Date();
     return new Date(now.getFullYear(), 0, 1).toISOString();
   }, []);
+
+  // quick lookup for stat by slot (for rating meter)
+  const statBySlotKey = useMemo(() => {
+    const m = new Map<string, SlotStat>();
+    for (const s of slotStats) m.set(`${s.timeframe}:${s.slot_index}`, s);
+    return m;
+  }, [slotStats]);
 
   useEffect(() => {
     let cancelled = false;
@@ -316,12 +330,11 @@ export default function TeamPage() {
           const currentTaskTitle =
             playerHandle && tmap[taskKey(playerHandle, tf, i)]?.title
               ? tmap[taskKey(playerHandle, tf, i)]!.title
-              : `(${slotLabel(tf, i)})`;
+              : `(${tfLabel(tf)})`;
 
           stats.push({
             timeframe: tf,
             slot_index: i,
-            label: slotLabel(tf, i),
             playerHandle,
             playerName,
             playerAvatar,
@@ -361,39 +374,75 @@ export default function TeamPage() {
     return sum;
   }, [picksBySlot, tasksByKey]);
 
-  const SlotCard = ({ tf, i, label }: { tf: Timeframe; i: number; label: string }) => {
+  function RatingMeter({ tf, pct }: { tf: Timeframe; pct: number }) {
+    const h = clampPct(pct);
+    const barColor = tf === "weekly" ? "bg-sky-500" : tf === "monthly" ? "bg-indigo-500" : "bg-amber-500";
+
+    return (
+      <div className="flex items-center gap-2">
+        <div className="relative h-10 w-3 overflow-hidden rounded-full border border-slate-200 bg-white">
+          <div className={"absolute bottom-0 left-0 right-0 " + barColor} style={{ height: `${h}%` }} />
+        </div>
+        <div className="text-xs font-black text-slate-900">{h}%</div>
+      </div>
+    );
+  }
+
+  const SlotCard = ({ tf, i }: { tf: Timeframe; i: number }) => {
     const p = picksBySlot[pickKey(tf, i)];
     const empty = !p;
 
     const playerHandle = p?.player_id ?? "";
-    const playerName = playerHandle ? nameByHandle[playerHandle] ?? playerHandle : "Empty slot";
+    const playerName = playerHandle ? nameByHandle[playerHandle] ?? playerHandle : "Empty";
     const avatar = playerHandle ? avatarByHandle[playerHandle] : null;
 
     const task = p ? tasksByKey[taskKey(playerHandle, tf, i)] : null;
-    const title = task?.title ?? (empty ? "Draft a friend’s goal here" : `${tf} goal ${i + 1}`);
+    const title = task?.title ?? (empty ? "Draft a friend’s goal" : tfLabel(tf));
     const done = !!task?.done_at;
 
+    const s = statBySlotKey.get(`${tf}:${i}`) ?? null;
+    const pct = s ? s.completionRate * 100 : 0;
+
     return (
-      <div className={["rounded-2xl border p-3 shadow-sm", empty ? "border-slate-200 bg-white/70" : "border-slate-200 bg-white/90"].join(" ")}>
+      <div className={["rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm", empty ? "opacity-80" : ""].join(" ")}>
         <div className="flex items-center justify-between gap-2">
-          <div className="text-xs font-bold uppercase tracking-wide text-slate-600">{label}</div>
+          <TimeframePill tf={tf} />
 
           {!empty && (
-            <div className={["rounded-xl border px-3 py-1 text-xs font-bold", done ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-700"].join(" ")}>
-              {done ? `✓ +${POINTS[tf]} pts` : "Not done"}
+            <div
+              className={[
+                "rounded-xl border px-3 py-1 text-xs font-bold",
+                done ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-slate-50 text-slate-700",
+              ].join(" ")}
+            >
+              {done ? `✓ +${POINTS[tf]}` : "Not done"}
             </div>
           )}
         </div>
 
-        <div className="mt-2 flex items-center gap-3">
-          <Avatar src={avatar} alt={playerName} size={34} />
-          <div className="min-w-0">
-            <div className="text-sm font-bold text-slate-900">{playerName}</div>
-            <div className="text-xs text-slate-500">{empty ? "No player drafted" : `Player: ${playerHandle}`}</div>
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Avatar src={avatar} alt={playerName} size={48} />
+            <div className="min-w-0">
+              <div className="text-base font-black text-slate-900">{playerName}</div>
+              <div className="text-xs text-slate-500">{empty ? "No player drafted" : tfLabel(tf)}</div>
+            </div>
           </div>
+
+          {/* rating meter (YTD completion rate for this slot) */}
+          {empty ? (
+            <div className="text-xs font-bold text-slate-400">—</div>
+          ) : (
+            <RatingMeter tf={tf} pct={pct} />
+          )}
         </div>
 
-        <div className={["mt-3 rounded-xl border px-3 py-2 text-sm font-semibold", done ? "border-emerald-200 bg-emerald-50/40 text-slate-700" : "border-slate-200 bg-white text-slate-900"].join(" ")}>
+        <div
+          className={[
+            "mt-3 rounded-xl border px-3 py-2 text-sm font-semibold",
+            done ? "border-emerald-200 bg-emerald-50/40 text-slate-700" : "border-slate-200 bg-white text-slate-900",
+          ].join(" ")}
+        >
           {title}
         </div>
       </div>
@@ -416,14 +465,14 @@ export default function TeamPage() {
   const TeamStatsPanel = () => (
     <div className="mt-6 overflow-hidden rounded-2xl border border-slate-200">
       <div className="bg-slate-50 px-4 py-3">
-        <div className="text-sm font-bold text-slate-900">Slot stat lines</div>
-        <div className="text-xs text-slate-600">Points are total points earned YTD for that slot. Rate is based on time elapsed this year.</div>
+        <div className="text-sm font-bold text-slate-900">Slot stats</div>
+        <div className="text-xs text-slate-600">Points are total points earned YTD for that slot.</div>
       </div>
 
       <table className="w-full text-left text-sm">
         <thead className="bg-white text-xs font-bold uppercase text-slate-600">
           <tr className="border-t border-slate-200">
-            <th className="px-4 py-3">Slot</th>
+            <th className="px-4 py-3">Type</th>
             <th className="px-4 py-3">Player</th>
             <th className="px-4 py-3">Goal</th>
             <th className="px-4 py-3">Points</th>
@@ -433,19 +482,22 @@ export default function TeamPage() {
 
         <tbody className="divide-y divide-slate-200 bg-white">
           {slotStats.map((s) => {
-            const pct = Math.round(s.completionRate * 100);
+            const pct = clampPct(s.completionRate * 100);
             const isEmpty = !s.playerHandle;
+            const barColor = s.timeframe === "weekly" ? "bg-sky-500" : s.timeframe === "monthly" ? "bg-indigo-500" : "bg-amber-500";
 
             return (
               <tr key={`${s.timeframe}-${s.slot_index}`} className={isEmpty ? "opacity-70" : ""}>
                 <td className="px-4 py-3">
-                  <div className="font-semibold text-slate-900">{s.label}</div>
-                  <div className="text-xs text-slate-500">{s.timeframe}</div>
+                  <div className="flex items-center gap-2">
+                    <TimeframeDot tf={s.timeframe} />
+                    <div className="font-semibold text-slate-900">{tfLabel(s.timeframe)}</div>
+                  </div>
                 </td>
 
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-2">
-                    <Avatar src={s.playerAvatar} alt={s.playerName} size={26} />
+                    <Avatar src={s.playerAvatar} alt={s.playerName} size={28} />
                     <div className="min-w-0">
                       <div className="font-semibold text-slate-900">{s.playerName}</div>
                       <div className="text-xs text-slate-500">{s.playerHandle ?? "—"}</div>
@@ -458,19 +510,15 @@ export default function TeamPage() {
                 </td>
 
                 <td className="px-4 py-3">
-                  <div className="font-black text-emerald-700">{s.points}</div>
-                  <div className="text-xs text-slate-500">
-                    <span title={`Completions: ${s.completions} (rate uses perfect=${s.perfect})`}>YTD</span>
-                  </div>
+                  <div className={"font-black " + timeframeAccentTextClass(s.timeframe)}>{s.points}</div>
                 </td>
 
                 <td className="px-4 py-3">
-                  <div className="font-bold text-slate-900">{isNaN(pct) ? 0 : pct}%</div>
-                  <div className="mt-1 h-2 w-32 overflow-hidden rounded-full border border-slate-200 bg-slate-50">
-                    <div
-                      className="h-full bg-emerald-500"
-                      style={{ width: `${Math.max(0, Math.min(100, isNaN(pct) ? 0 : pct))}%` }}
-                    />
+                  <div className="flex items-center gap-3">
+                    <div className="text-sm font-bold text-slate-900">{pct}%</div>
+                    <div className="h-2 w-36 overflow-hidden rounded-full border border-slate-200 bg-slate-50">
+                      <div className={"h-full " + barColor} style={{ width: `${pct}%` }} />
+                    </div>
                   </div>
                 </td>
               </tr>
@@ -502,21 +550,31 @@ export default function TeamPage() {
       </div>
 
       <div className="mt-4 grid gap-2 sm:grid-cols-3">
-        <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
-          <div className="text-xs font-bold text-sky-900">Weekly events</div>
-          <div className="mt-1 text-3xl font-black text-sky-900">{teamYtd.weekly}</div>
+        <div className={"rounded-2xl border p-4 " + timeframePanelClass("weekly")}>
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
+            <TimeframeDot tf="weekly" />
+            Weekly
+          </div>
+          <div className={"mt-1 text-3xl font-black " + timeframeAccentTextClass("weekly")}>{teamYtd.weekly}</div>
         </div>
-        <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
-          <div className="text-xs font-bold text-indigo-900">Monthly events</div>
-          <div className="mt-1 text-3xl font-black text-indigo-900">{teamYtd.monthly}</div>
+
+        <div className={"rounded-2xl border p-4 " + timeframePanelClass("monthly")}>
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
+            <TimeframeDot tf="monthly" />
+            Monthly
+          </div>
+          <div className={"mt-1 text-3xl font-black " + timeframeAccentTextClass("monthly")}>{teamYtd.monthly}</div>
         </div>
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-          <div className="text-xs font-bold text-emerald-900">Yearly events</div>
-          <div className="mt-1 text-3xl font-black text-emerald-900">{teamYtd.yearly}</div>
+
+        <div className={"rounded-2xl border p-4 " + timeframePanelClass("yearly")}>
+          <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
+            <TimeframeDot tf="yearly" />
+            Yearly
+          </div>
+          <div className={"mt-1 text-3xl font-black " + timeframeAccentTextClass("yearly")}>{teamYtd.yearly}</div>
         </div>
       </div>
 
-      {/* simplified stat lines */}
       <TeamStatsPanel />
 
       <div className="mt-8">
@@ -552,43 +610,53 @@ export default function TeamPage() {
 
                   return historyByWeek.groups[wkKey]
                     .sort((a, b) => (a.completed_at < b.completed_at ? 1 : -1))
-                    .map((r, idx) => (
-                      <tr key={`${wkKey}-${r.id}`}>
-                        <td className="px-4 py-3 text-slate-700">
-                          {idx === 0 ? (
-                            <div className="font-semibold">
-                              W{wkNum}{" "}
-                              <span className="text-slate-500">
-                                ({fmtShort(wkStart)}–{fmtShort(wkEnd)})
-                              </span>
+                    .map((r, idx) => {
+                      const tf = r.timeframe as Timeframe;
+                      const ptsClass = timeframeAccentTextClass(tf);
+
+                      return (
+                        <tr key={`${wkKey}-${r.id}`}>
+                          <td className="px-4 py-3 text-slate-700">
+                            {idx === 0 ? (
+                              <div className="font-semibold">
+                                W{wkNum}{" "}
+                                <span className="text-slate-500">
+                                  ({fmtShort(wkStart)}–{fmtShort(wkEnd)})
+                                </span>
+                              </div>
+                            ) : (
+                              ""
+                            )}
+                          </td>
+
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <Avatar src={r.playerAvatar} alt={r.playerName} size={28} />
+                              <span className="font-semibold text-slate-900">{r.playerName}</span>
                             </div>
-                          ) : (
-                            ""
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <Avatar src={r.playerAvatar} alt={r.playerName} size={26} />
-                            <span className="font-semibold text-slate-900">{r.playerName}</span>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-slate-600">
-                          {new Date(r.completed_at).toLocaleString(undefined, {
-                            month: "short",
-                            day: "numeric",
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })}
-                        </td>
-                        <td className="px-4 py-3 font-semibold text-slate-900">{r.title ?? `(slot ${r.slot_index + 1})`}</td>
-                        <td className="px-4 py-3">
-                          <span className="rounded-lg border border-slate-200 bg-slate-50 px-2 py-1 text-xs font-bold text-slate-700">
-                            {r.timeframe}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 font-bold text-emerald-700">+{r.pts}</td>
-                      </tr>
-                    ));
+                          </td>
+
+                          <td className="px-4 py-3 text-slate-600">
+                            {new Date(r.completed_at).toLocaleString(undefined, {
+                              month: "short",
+                              day: "numeric",
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })}
+                          </td>
+
+                          <td className="px-4 py-3 font-semibold text-slate-900">
+                            {r.title ?? `(slot ${r.slot_index + 1})`}
+                          </td>
+
+                          <td className="px-4 py-3">
+                            <TimeframePill tf={tf} />
+                          </td>
+
+                          <td className={"px-4 py-3 font-bold " + ptsClass}>+{r.pts}</td>
+                        </tr>
+                      );
+                    });
                 })
               )}
             </tbody>
@@ -604,7 +672,7 @@ export default function TeamPage() {
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">My Team</h1>
-            <p className="mt-1 text-sm text-slate-600">Soccer-style lineup of your drafted goals.</p>
+            <p className="mt-1 text-sm text-slate-600">Drafted goals in a simple soccer formation.</p>
           </div>
 
           <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
@@ -612,9 +680,9 @@ export default function TeamPage() {
               <div className="text-xs font-semibold text-slate-600">Manager</div>
               <div className="text-sm font-bold text-slate-900">{managerName}</div>
             </div>
-            <Avatar src={avatarByHandle[activeUser]} alt={managerName} size={36} />
+            <Avatar src={avatarByHandle[activeUser]} alt={managerName} size={40} />
             <div className="ml-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">
-              {totalPointsNow} pts (current)
+              {totalPointsNow} pts
             </div>
           </div>
         </div>
@@ -624,7 +692,7 @@ export default function TeamPage() {
             <div className="text-sm font-semibold text-slate-900">Today: {seasonClock.today}</div>
             <div className="flex flex-wrap gap-2">
               <span className="inline-flex items-center rounded-xl border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-bold text-sky-800">
-                {seasonClock.weekLabel} · {seasonClock.weekRange} · ends in {seasonClock.weekEndsIn}d
+                {seasonClock.weekLabel} · ends in {seasonClock.weekEndsIn}d
               </span>
               <span className="inline-flex items-center rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-bold text-indigo-800">
                 {seasonClock.monthLabel} · ends in {seasonClock.monthEndsIn}d
@@ -637,9 +705,9 @@ export default function TeamPage() {
           <div className="mt-4 rounded-2xl border border-red-200 bg-white p-4 text-sm text-red-700">{msg}</div>
         )}
 
-        {/* Formation */}
-        <div className="mt-6 rounded-3xl border border-slate-200 bg-gradient-to-b from-emerald-50 to-sky-50 p-5 shadow-sm">
-          <div className="relative mx-auto max-w-3xl overflow-hidden rounded-3xl border border-emerald-200 bg-emerald-100/40 p-5">
+        {/* Formation: keep ONLY the soccer field container */}
+        <div className="mt-6">
+          <div className="relative mx-auto max-w-3xl overflow-hidden rounded-3xl border border-emerald-200 bg-emerald-100/40 p-5 shadow-sm">
             <div className="pointer-events-none absolute inset-0">
               <div className="absolute left-0 right-0 top-1/2 h-[2px] bg-emerald-200/70" />
               <div className="absolute left-1/2 top-1/2 h-28 w-28 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-emerald-200/70" />
@@ -650,26 +718,25 @@ export default function TeamPage() {
             ) : (
               <div className="relative grid gap-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <SlotCard tf="weekly" i={0} label="Weekly 1" />
-                  <SlotCard tf="weekly" i={1} label="Weekly 2" />
-                  <SlotCard tf="weekly" i={2} label="Weekly 3" />
+                  <SlotCard tf="weekly" i={0} />
+                  <SlotCard tf="weekly" i={1} />
+                  <SlotCard tf="weekly" i={2} />
                 </div>
 
                 <div className="mx-auto grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
-                  <SlotCard tf="monthly" i={0} label="Monthly 1" />
-                  <SlotCard tf="monthly" i={1} label="Monthly 2" />
+                  <SlotCard tf="monthly" i={0} />
+                  <SlotCard tf="monthly" i={1} />
                 </div>
 
                 <div className="mx-auto grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
-                  <SlotCard tf="yearly" i={0} label="Yearly 1" />
-                  <SlotCard tf="yearly" i={1} label="Yearly 2" />
+                  <SlotCard tf="yearly" i={0} />
+                  <SlotCard tf="yearly" i={1} />
                 </div>
               </div>
             )}
           </div>
         </div>
 
-        {/* YTD + simplified stats + history */}
         <TeamYtdAndHistory />
       </div>
     </main>
