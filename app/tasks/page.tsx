@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "../../lib/supabase";
 import Avatar from "../components/Avatar";
 import type { Timeframe } from "../../lib/timeframeTheme";
@@ -32,13 +32,31 @@ type CompletionRow = {
   completed_at: string;
 };
 
+type SlotStat = {
+  timeframe: Timeframe;
+  slot_index: number;
+  taskTitle: string;
+  completions: number;
+  perfect: number;
+  completionRate: number;
+  points: number;
+};
+
+type YtdCounts = { weekly: number; monthly: number; yearly: number; total: number };
+
 const SLOT_COUNTS: Record<Timeframe, number> = { weekly: 3, monthly: 2, yearly: 2 };
 const POINTS: Record<Timeframe, number> = { weekly: 1, monthly: 4, yearly: 40 };
 
 function slotKey(tf: Timeframe, i: number) {
   return `${tf}:${i}`;
 }
-
+function defaultGoalTitle(tf: Timeframe, i: number) {
+  return tf === "weekly"
+    ? `Weekly goal ${i + 1}`
+    : tf === "monthly"
+    ? `Monthly goal ${i + 1}`
+    : `Yearly goal ${i + 1}`;
+}
 function startOfDay(d: Date) {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
@@ -91,24 +109,125 @@ function clampPct(x: number) {
   return Math.max(0, Math.min(100, Math.round(x)));
 }
 
-type YtdCounts = { weekly: number; monthly: number; yearly: number; total: number };
+function RatingMeter({ tf, pct }: { tf: Timeframe; pct: number }) {
+  const h = clampPct(pct);
+  const barColor = tf === "weekly" ? "bg-sky-500" : tf === "monthly" ? "bg-indigo-500" : "bg-amber-500";
 
-type SlotStat = {
-  timeframe: Timeframe;
-  slot_index: number;
-  taskTitle: string;
-  completions: number;
-  perfect: number;
-  completionRate: number;
-  points: number;
-};
+  return (
+    <div className="flex items-center gap-2">
+      <div className="relative h-10 w-3 overflow-hidden rounded-full border border-slate-200 bg-white">
+        <div className={"absolute bottom-0 left-0 right-0 " + barColor} style={{ height: `${h}%` }} />
+      </div>
+      <div className="text-xs font-black text-slate-900">{h}%</div>
+    </div>
+  );
+}
+
+function TaskCard({
+  tf,
+  i,
+  title,
+  done,
+  pct,
+  displayName,
+  avatarUrl,
+  onToggleDone,
+  onSaveTitle,
+}: {
+  tf: Timeframe;
+  i: number;
+  title: string;
+  done: boolean;
+  pct: number;
+  displayName: string;
+  avatarUrl: string | null;
+  onToggleDone: (tf: Timeframe, i: number) => void;
+  onSaveTitle: (tf: Timeframe, i: number, title: string) => Promise<void>;
+}) {
+  const [value, setValue] = useState(title);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setValue(title);
+  }, [title, tf, i]);
+
+  const saveNow = useCallback(async () => {
+    const clean = value.trim();
+    if (!clean) return;
+    if (clean === title) return;
+    setSaving(true);
+    try {
+      await onSaveTitle(tf, i, clean);
+    } finally {
+      setSaving(false);
+    }
+  }, [value, title, tf, i, onSaveTitle]);
+
+  return (
+    <div className={["rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm transition", done ? "ring-1 ring-emerald-200" : "hover:bg-slate-50"].join(" ")}>
+      <div className="flex items-center justify-between gap-2">
+        <TimeframePill tf={tf} />
+
+        <button
+          type="button"
+          onClick={() => onToggleDone(tf, i)}
+          className={[
+            "flex h-10 w-10 items-center justify-center rounded-xl border text-lg font-black transition",
+            done ? "border-emerald-300 bg-emerald-600 text-white" : "border-slate-300 bg-white text-slate-300 hover:border-slate-400",
+          ].join(" ")}
+          title="Mark done"
+        >
+          {done ? "✓" : ""}
+        </button>
+      </div>
+
+      <div className="mt-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <Avatar src={avatarUrl} alt={displayName} size={56} />
+          <div className="min-w-0">
+            <div className="text-sm font-black text-slate-900">{displayName}</div>
+          </div>
+        </div>
+
+        <RatingMeter tf={tf} pct={pct} />
+      </div>
+
+      <input
+        value={value}
+        onChange={(e) => setValue(e.target.value)}
+        onBlur={() => saveNow()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            saveNow();
+            (e.currentTarget as HTMLInputElement).blur();
+          }
+        }}
+        className={[
+          "mt-3 w-full rounded-xl border px-3 py-2 text-sm font-semibold outline-none",
+          done ? "border-emerald-200 bg-white/60 text-slate-700" : "border-slate-200 bg-white text-slate-900",
+        ].join(" ")}
+        placeholder="Set your goal..."
+      />
+
+      <div className="mt-2 flex justify-end">
+        <button
+          type="button"
+          onClick={saveNow}
+          disabled={saving}
+          className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+        >
+          {saving ? "Saving..." : "Save"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 export default function TasksPage() {
   const { loading: authLoading, userId, profile, leagueId } = useAuthedLeague();
 
   const [tasks, setTasks] = useState<Record<string, TaskRow>>({});
-  const [draftTitles, setDraftTitles] = useState<Record<string, string>>({});
-
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState("");
 
@@ -246,26 +365,34 @@ export default function TasksPage() {
         map[slotKey(t.timeframe, t.slot_index)] = t;
       }
 
+      const missingRows: TaskRow[] = [];
       (["weekly", "monthly", "yearly"] as Timeframe[]).forEach((tf) => {
         for (let i = 0; i < SLOT_COUNTS[tf]; i++) {
           const k = slotKey(tf, i);
           if (!map[k]) {
-            map[k] = {
+            const row: TaskRow = {
               league_id: leagueId,
               user_id: userId,
               timeframe: tf,
               slot_index: i,
-              title:
-                tf === "weekly"
-                  ? `Weekly goal ${i + 1}`
-                  : tf === "monthly"
-                  ? `Monthly goal ${i + 1}`
-                  : `Yearly goal ${i + 1}`,
+              title: defaultGoalTitle(tf, i),
               done_at: null,
             };
+            map[k] = row;
+            missingRows.push(row);
           }
         }
       });
+
+      if (missingRows.length > 0) {
+        const upRes = await supabase
+          .from("tasks")
+          .upsert(missingRows, { onConflict: "league_id,user_id,timeframe,slot_index" });
+
+        if (upRes.error && !cancelled) {
+          setMsg(upRes.error.message);
+        }
+      }
 
       if (cancelled) {
         loadingRef.current = false;
@@ -273,16 +400,6 @@ export default function TasksPage() {
       }
 
       setTasks(map);
-
-      const dt: Record<string, string> = {};
-      for (const tf of ["weekly", "monthly", "yearly"] as Timeframe[]) {
-        for (let i = 0; i < SLOT_COUNTS[tf]; i++) {
-          const k = slotKey(tf, i);
-          dt[k] = map[k]?.title ?? "";
-        }
-      }
-      setDraftTitles(dt);
-
       await loadYTDHistoryAndStats(map);
 
       if (!cancelled) setLoading(false);
@@ -297,38 +414,44 @@ export default function TasksPage() {
     };
   }, [authLoading, leagueId, userId, startOfYearISO]);
 
-  const saveTitleOnBlur = async (tf: Timeframe, i: number) => {
-    if (!leagueId || !userId) return;
+  const saveTitle = useCallback(
+    async (tf: Timeframe, i: number, title: string) => {
+      if (!leagueId || !userId) return;
 
-    const k = slotKey(tf, i);
-    const cur = tasks[k];
-    const title = (draftTitles[k] ?? "").trim();
+      const k = slotKey(tf, i);
+      const cur = tasks[k];
+      if (!cur) return;
 
-    if (!cur) return;
-    if (title.length === 0) return;
-    if (title === cur.title) return;
+      const clean = title.trim();
+      if (!clean) return;
+      if (clean === cur.title) return;
 
-    const next: TaskRow = { ...cur, title };
-    setTasks((prev) => ({ ...prev, [k]: next }));
+      const next: TaskRow = { ...cur, title: clean };
+      setTasks((prev) => ({ ...prev, [k]: next }));
 
-    const { error } = await supabase
-      .from("tasks")
-      .upsert(
-        {
-          league_id: leagueId,
-          user_id: userId,
-          timeframe: tf,
-          slot_index: i,
-          title: next.title,
-          done_at: next.done_at,
-        },
-        { onConflict: "league_id,user_id,timeframe,slot_index" }
-      );
+      const { error } = await supabase
+        .from("tasks")
+        .upsert(
+          {
+            league_id: leagueId,
+            user_id: userId,
+            timeframe: tf,
+            slot_index: i,
+            title: clean,
+            done_at: cur.done_at,
+          },
+          { onConflict: "league_id,user_id,timeframe,slot_index" }
+        );
 
-    if (error) setMsg(error.message);
+      if (error) {
+        setMsg(error.message);
+        return;
+      }
 
-    await loadYTDHistoryAndStats({ ...tasks, [k]: next });
-  };
+      await loadYTDHistoryAndStats({ ...tasks, [k]: next });
+    },
+    [leagueId, userId, tasks]
+  );
 
   const toggleDone = async (tf: Timeframe, i: number) => {
     if (!leagueId || !userId) return;
@@ -377,74 +500,6 @@ export default function TasksPage() {
     }
 
     await loadYTDHistoryAndStats({ ...tasks, [k]: next });
-  };
-
-  function RatingMeter({ tf, pct }: { tf: Timeframe; pct: number }) {
-    const h = clampPct(pct);
-    const barColor = tf === "weekly" ? "bg-sky-500" : tf === "monthly" ? "bg-indigo-500" : "bg-amber-500";
-
-    return (
-      <div className="flex items-center gap-2">
-        <div className="relative h-10 w-3 overflow-hidden rounded-full border border-slate-200 bg-white">
-          <div className={"absolute bottom-0 left-0 right-0 " + barColor} style={{ height: `${h}%` }} />
-        </div>
-        <div className="text-xs font-black text-slate-900">{h}%</div>
-      </div>
-    );
-  }
-
-  const CheckCard = ({ tf, i }: { tf: Timeframe; i: number }) => {
-    const k = slotKey(tf, i);
-    const t = tasks[k];
-    const done = !!t?.done_at;
-
-    const s = statsBySlot.get(`${tf}:${i}`) ?? null;
-    const pct = s ? s.completionRate * 100 : 0;
-
-    return (
-      <div className={["rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm transition", done ? "ring-1 ring-emerald-200" : "hover:bg-slate-50"].join(" ")}>
-        <div className="flex items-center justify-between gap-2">
-          <TimeframePill tf={tf} />
-
-          <button
-            type="button"
-            onClick={() => toggleDone(tf, i)}
-            className={[
-              "flex h-10 w-10 items-center justify-center rounded-xl border text-lg font-black transition",
-              done ? "border-emerald-300 bg-emerald-600 text-white" : "border-slate-300 bg-white text-slate-300 hover:border-slate-400",
-            ].join(" ")}
-            title="Mark done"
-          >
-            {done ? "✓" : ""}
-          </button>
-        </div>
-
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <Avatar src={avatarUrl} alt={displayName} size={56} />
-            <div className="min-w-0">
-              <div className="text-sm font-black text-slate-900">{displayName}</div>
-            </div>
-          </div>
-
-          <RatingMeter tf={tf} pct={pct} />
-        </div>
-
-        <input
-          value={draftTitles[k] ?? ""}
-          onChange={(e) => setDraftTitles((prev) => ({ ...prev, [k]: e.target.value }))}
-          onBlur={() => saveTitleOnBlur(tf, i)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") (e.currentTarget as HTMLInputElement).blur();
-          }}
-          className={[
-            "mt-3 w-full rounded-xl border px-3 py-2 text-sm font-semibold outline-none",
-            done ? "border-emerald-200 bg-white/60 text-slate-700" : "border-slate-200 bg-white text-slate-900",
-          ].join(" ")}
-          placeholder="Set your goal..."
-        />
-      </div>
-    );
   };
 
   const historyByWeek = useMemo(() => {
@@ -679,19 +734,89 @@ export default function TasksPage() {
             ) : (
               <div className="relative grid gap-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <CheckCard tf="weekly" i={0} />
-                  <CheckCard tf="weekly" i={1} />
-                  <CheckCard tf="weekly" i={2} />
+                  <TaskCard
+                    tf="weekly"
+                    i={0}
+                    title={tasks[slotKey("weekly", 0)]?.title ?? ""}
+                    done={!!tasks[slotKey("weekly", 0)]?.done_at}
+                    pct={(statsBySlot.get("weekly:0")?.completionRate ?? 0) * 100}
+                    displayName={displayName}
+                    avatarUrl={avatarUrl}
+                    onToggleDone={toggleDone}
+                    onSaveTitle={saveTitle}
+                  />
+                  <TaskCard
+                    tf="weekly"
+                    i={1}
+                    title={tasks[slotKey("weekly", 1)]?.title ?? ""}
+                    done={!!tasks[slotKey("weekly", 1)]?.done_at}
+                    pct={(statsBySlot.get("weekly:1")?.completionRate ?? 0) * 100}
+                    displayName={displayName}
+                    avatarUrl={avatarUrl}
+                    onToggleDone={toggleDone}
+                    onSaveTitle={saveTitle}
+                  />
+                  <TaskCard
+                    tf="weekly"
+                    i={2}
+                    title={tasks[slotKey("weekly", 2)]?.title ?? ""}
+                    done={!!tasks[slotKey("weekly", 2)]?.done_at}
+                    pct={(statsBySlot.get("weekly:2")?.completionRate ?? 0) * 100}
+                    displayName={displayName}
+                    avatarUrl={avatarUrl}
+                    onToggleDone={toggleDone}
+                    onSaveTitle={saveTitle}
+                  />
                 </div>
 
                 <div className="mx-auto grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
-                  <CheckCard tf="monthly" i={0} />
-                  <CheckCard tf="monthly" i={1} />
+                  <TaskCard
+                    tf="monthly"
+                    i={0}
+                    title={tasks[slotKey("monthly", 0)]?.title ?? ""}
+                    done={!!tasks[slotKey("monthly", 0)]?.done_at}
+                    pct={(statsBySlot.get("monthly:0")?.completionRate ?? 0) * 100}
+                    displayName={displayName}
+                    avatarUrl={avatarUrl}
+                    onToggleDone={toggleDone}
+                    onSaveTitle={saveTitle}
+                  />
+                  <TaskCard
+                    tf="monthly"
+                    i={1}
+                    title={tasks[slotKey("monthly", 1)]?.title ?? ""}
+                    done={!!tasks[slotKey("monthly", 1)]?.done_at}
+                    pct={(statsBySlot.get("monthly:1")?.completionRate ?? 0) * 100}
+                    displayName={displayName}
+                    avatarUrl={avatarUrl}
+                    onToggleDone={toggleDone}
+                    onSaveTitle={saveTitle}
+                  />
                 </div>
 
                 <div className="mx-auto grid w-full max-w-xl grid-cols-1 gap-3 sm:grid-cols-2">
-                  <CheckCard tf="yearly" i={0} />
-                  <CheckCard tf="yearly" i={1} />
+                  <TaskCard
+                    tf="yearly"
+                    i={0}
+                    title={tasks[slotKey("yearly", 0)]?.title ?? ""}
+                    done={!!tasks[slotKey("yearly", 0)]?.done_at}
+                    pct={(statsBySlot.get("yearly:0")?.completionRate ?? 0) * 100}
+                    displayName={displayName}
+                    avatarUrl={avatarUrl}
+                    onToggleDone={toggleDone}
+                    onSaveTitle={saveTitle}
+                  />
+                  <TaskCard
+                    tf="yearly"
+                    i={1}
+                    title={tasks[slotKey("yearly", 1)]?.title ?? ""}
+                    done={!!tasks[slotKey("yearly", 1)]?.done_at}
+                    pct={(statsBySlot.get("yearly:1")?.completionRate ?? 0) * 100}
+                    displayName={displayName}
+                    avatarUrl={avatarUrl}
+                    onToggleDone={toggleDone}
+                    onSaveTitle={saveTitle}
+                  />
                 </div>
               </div>
             )}

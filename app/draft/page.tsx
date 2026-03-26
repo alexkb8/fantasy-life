@@ -33,6 +33,7 @@ type TaskRow = {
 };
 
 type DraftPick = {
+  id: number;
   league_id: string;
   pick_number: number;
   manager_id: string;
@@ -45,7 +46,6 @@ type DraftPick = {
 type ProfileRow = {
   id: string;
   display_name: string | null;
-  avatar_url: string | null;
 };
 
 function snakeManager(membersAsc: string[], pickNumber: number) {
@@ -83,14 +83,12 @@ export default function DraftPage() {
   const [state, setState] = useState<DraftState | null>(null);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [picks, setPicks] = useState<DraftPick[]>([]);
-
   const [nameById, setNameById] = useState<Record<string, string>>({});
 
   const [err, setErr] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
   const [pending, setPending] = useState<null | "start" | "autopick" | "pick">(null);
 
-  // countdown tick (slower to reduce rerenders)
   const [nowTick, setNowTick] = useState<number>(Date.now());
   useEffect(() => {
     const id = setInterval(() => setNowTick(Date.now()), 750);
@@ -99,12 +97,18 @@ export default function DraftPage() {
 
   const subsRef = useRef<any[]>([]);
 
-  // Draft order scroll persistence
   const draftOrderScrollEl = useRef<HTMLDivElement | null>(null);
   const draftOrderScrollTop = useRef<number>(0);
 
-  // ---- Fetch helpers ----
+  const me = userId ?? "";
+
+  const showName = (id: string | null) => {
+    if (!id) return "—";
+    return nameById[id] ?? id.slice(0, 6);
+  };
+
   const fetchMembers = async () => {
+    if (!leagueId) return;
     const res = await supabase.from("league_members").select("league_id,user_id").eq("league_id", leagueId);
     if (res.error) throw res.error;
     const ids = ((res.data ?? []) as LeagueMember[]).map((x) => x.user_id).sort();
@@ -112,41 +116,56 @@ export default function DraftPage() {
   };
 
   const fetchProfiles = async () => {
-    // Pull all profiles and filter locally by member list (simple)
-    const res = await supabase.from("profiles").select("id,display_name");
-    if (res.error) return;
+    if (!leagueId) return;
+    const memRes = await supabase.from("league_members").select("user_id").eq("league_id", leagueId);
+    if (memRes.error) throw memRes.error;
+    const ids = (memRes.data ?? []).map((x: any) => x.user_id as string);
+    if (ids.length === 0) {
+      setNameById({});
+      return;
+    }
+
+    const profRes = await supabase.from("profiles").select("id, display_name").in("id", ids);
+    if (profRes.error) throw profRes.error;
+
     const map: Record<string, string> = {};
-    for (const p of (res.data ?? []) as ProfileRow[]) {
+    for (const p of (profRes.data ?? []) as ProfileRow[]) {
       map[p.id] = p.display_name || p.id.slice(0, 6);
     }
     setNameById(map);
   };
 
   const fetchState = async () => {
+    if (!leagueId) return;
     const res = await supabase
       .from("draft_state")
       .select("league_id,status,pick_number,pick_deadline")
       .eq("league_id", leagueId)
       .single();
+
     if (res.error) throw res.error;
     setState((res.data as DraftState) ?? null);
   };
 
   const fetchTasks = async () => {
+    if (!leagueId) return;
     const res = await supabase
       .from("tasks")
       .select("league_id,user_id,timeframe,slot_index,title,done_at")
       .eq("league_id", leagueId);
+
     if (res.error) throw res.error;
     setTasks((res.data ?? []) as TaskRow[]);
   };
 
   const fetchPicks = async () => {
+    if (!leagueId) return;
     const res = await supabase
       .from("draft_picks")
-      .select("league_id,pick_number,manager_id,drafted_user_id,timeframe,slot_index,created_at")
+      .select("id,league_id,pick_number,manager_id,drafted_user_id,timeframe,slot_index,created_at")
       .eq("league_id", leagueId)
       .order("pick_number", { ascending: true });
+
     if (res.error) throw res.error;
     setPicks((res.data ?? []) as DraftPick[]);
   };
@@ -161,7 +180,6 @@ export default function DraftPage() {
     }
   };
 
-  // ---- Realtime subscriptions ----
   useEffect(() => {
     if (authLoading) return;
     if (!leagueId || !userId) return;
@@ -211,7 +229,13 @@ export default function DraftPage() {
         .on(
           "postgres_changes",
           { event: "*", schema: "public", table: "league_members", filter: `league_id=eq.${leagueId}` },
-          () => fetchMembers().catch((e: any) => setErr(String(e?.message ?? e)))
+          async () => {
+            try {
+              await Promise.all([fetchMembers(), fetchProfiles()]);
+            } catch (e: any) {
+              setErr(String(e?.message ?? e));
+            }
+          }
         )
         .subscribe();
 
@@ -231,10 +255,8 @@ export default function DraftPage() {
         subsRef.current = [];
       })();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authLoading, leagueId, userId]);
 
-  // Restore draft order scroll position after rerenders
   useEffect(() => {
     const el = draftOrderScrollEl.current;
     if (!el) return;
@@ -244,10 +266,6 @@ export default function DraftPage() {
     });
   }, [picks.length, members.length, state?.pick_number, state?.status, nowTick]);
 
-  const me = userId!;
-  const showName = (id: string) => nameById[id] ?? id.slice(0, 6);
-
-  // ---- Derived ----
   const totalPicks = useMemo(() => members.length * PICKS_PER_MANAGER, [members.length]);
 
   const currentManager = useMemo(() => {
@@ -271,19 +289,26 @@ export default function DraftPage() {
   }, [picks]);
 
   const boardByTf = useMemo(() => {
-    const memberSet = new Set(members);
-    const eligible = tasks.filter((t) => memberSet.has(t.user_id));
     const groups: Record<Timeframe, TaskRow[]> = { weekly: [], monthly: [], yearly: [] };
-    for (const t of eligible) groups[t.timeframe].push(t);
+
+    for (const t of tasks) {
+      if (t.timeframe === "weekly" || t.timeframe === "monthly" || t.timeframe === "yearly") {
+        groups[t.timeframe].push(t);
+      }
+    }
 
     (Object.keys(groups) as Timeframe[]).forEach((tf) => {
       groups[tf].sort((a, b) =>
-        a.user_id !== b.user_id ? a.user_id.localeCompare(b.user_id) : a.slot_index - b.slot_index
+        a.user_id !== b.user_id
+          ? showName(a.user_id).localeCompare(showName(b.user_id))
+          : a.slot_index - b.slot_index
       );
     });
 
     return groups;
-  }, [tasks, members]);
+  }, [tasks, nameById]);
+
+
 
   const myRoster = useMemo(() => {
     const mine = picks.filter((p) => p.manager_id === me).sort((a, b) => a.pick_number - b.pick_number);
@@ -322,14 +347,13 @@ export default function DraftPage() {
   }, [myRoster]);
 
   const statusLine = useMemo(() => {
-    if (!state) return "Loading…";
+    if (!state) return "Loading...";
     if (state.status !== "active") return `Draft is ${state.status}. Click Start.`;
-    if (pending) return "Working…";
-    if (currentManager !== me) return `Not your turn. On the clock: ${showName(currentManager ?? "")}`;
+    if (pending) return "Working...";
+    if (currentManager !== me) return `Not your turn. On the clock: ${showName(currentManager)}`;
     return "Your turn — pick a goal.";
-  }, [state, pending, currentManager, me, showName]);
+  }, [state, pending, currentManager, me, nameById]);
 
-  // ---- RPC calls ----
   const callRpc = async (label: typeof pending, fn: () => Promise<{ error: any }>, okMsg: string) => {
     setErr("");
     setPending(label);
@@ -370,11 +394,11 @@ export default function DraftPage() {
       return;
     }
     if (pending) {
-      setStatusMsg("Please wait…");
+      setStatusMsg("Please wait...");
       return;
     }
     if (currentManager !== me) {
-      setStatusMsg(`Not your turn — on the clock: ${showName(currentManager ?? "")}.`);
+      setStatusMsg(`Not your turn — on the clock: ${showName(currentManager)}.`);
       return;
     }
 
@@ -393,6 +417,7 @@ export default function DraftPage() {
 
   function DraftSection({ tf, items }: { tf: Timeframe; items: TaskRow[] }) {
     const header = tf === "yearly" ? "Yearly" : tf === "monthly" ? "Monthly" : "Weekly";
+
     return (
       <div className={"rounded-3xl border p-4 " + timeframePanelClass(tf)}>
         <div className="flex items-center justify-between">
@@ -435,7 +460,7 @@ export default function DraftPage() {
                         : timeframeButtonClass(tf))
                     }
                   >
-                    {drafted ? "Picked" : pickInFlight ? "Picking…" : "Pick"}
+                    {drafted ? "Picked" : pickInFlight ? "Picking..." : "Pick"}
                   </button>
                 </div>
               </div>
@@ -524,6 +549,7 @@ export default function DraftPage() {
       rows: { timeframe: Timeframe; roster_slot_index: number; filled: boolean; player_id: string | null; goal_title: string | null }[];
     }) => {
       const header = tf === "yearly" ? "Yearly" : tf === "monthly" ? "Monthly" : "Weekly";
+
       return (
         <div className={"rounded-2xl border p-3 " + timeframePanelClass(tf)}>
           <div className="flex items-center justify-between">
@@ -541,10 +567,13 @@ export default function DraftPage() {
                   <div className="flex items-center gap-2 text-xs font-semibold">
                     <span className="text-slate-600">{s.filled ? "FILLED" : "OPEN"}</span>
                     <span className="text-slate-900">
-                      {tf === "weekly" ? "W" : tf === "monthly" ? "M" : "Y"}{s.roster_slot_index + 1}
+                      {tf === "weekly" ? "W" : tf === "monthly" ? "M" : "Y"}
+                      {s.roster_slot_index + 1}
                     </span>
                   </div>
-                  <div className="truncate text-right text-xs font-black text-slate-900">{s.filled ? showName(s.player_id!) : "—"}</div>
+                  <div className="truncate text-right text-xs font-black text-slate-900">
+                    {s.filled ? showName(s.player_id) : "—"}
+                  </div>
                 </div>
                 <div className="mt-1 line-clamp-2 text-[11px] text-slate-600">
                   {s.filled ? s.goal_title : "Pick a goal in this category."}
@@ -608,7 +637,7 @@ export default function DraftPage() {
               (pending ? " cursor-not-allowed" : "")
             }
           >
-            {pending === "start" ? "Starting…" : state?.status === "active" ? "Restart" : "Start"}
+            {pending === "start" ? "Starting..." : state?.status === "active" ? "Restart" : "Start"}
           </button>
 
           <button
@@ -623,7 +652,7 @@ export default function DraftPage() {
               (pending !== null || state?.status !== "active" ? " cursor-not-allowed opacity-70" : "")
             }
           >
-            {pending === "autopick" ? "Picking…" : "Autopick"}
+            {pending === "autopick" ? "Picking..." : "Autopick"}
           </button>
         </div>
 

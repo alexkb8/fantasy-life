@@ -11,31 +11,43 @@ import {
   timeframePanelClass,
   timeframeAccentTextClass,
 } from "../components/TimeframeUI";
+import { useAuthedLeague } from "../components/useAuthedLeague";
 
 const POINTS: Record<Timeframe, number> = { weekly: 1, monthly: 4, yearly: 40 };
 const SLOT_COUNTS: Record<Timeframe, number> = { weekly: 3, monthly: 2, yearly: 2 };
 
-type PickRow = { manager_id: string; timeframe: Timeframe; slot_index: number; player_id: string };
-type TaskRow = { user_id: string; timeframe: Timeframe; slot_index: number; title: string; done_at: string | null };
-type ProfileRow = { handle: string | null; display_name: string | null; avatar_url: string | null };
+type PickRow = {
+  league_id: string;
+  manager_id: string;
+  timeframe: Timeframe;
+  slot_index: number;
+  player_id: string;
+};
+
+type TaskRow = {
+  league_id: string;
+  user_id: string;
+  timeframe: Timeframe;
+  slot_index: number;
+  title: string;
+  done_at: string | null;
+};
+
+type ProfileRow = {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+};
+
 type CompletionRow = {
   id: number;
+  league_id: string;
   user_id: string;
   timeframe: string;
   slot_index: number;
   title: string | null;
   completed_at: string;
 };
-
-type UserId = "alex" | "bob" | "jeff" | "sean";
-const ACTIVE_USER_KEY = "fantasy-life:activeUser";
-
-function getActiveUser(): UserId {
-  if (typeof window === "undefined") return "alex";
-  const raw = localStorage.getItem(ACTIVE_USER_KEY);
-  if (raw === "alex" || raw === "bob" || raw === "jeff" || raw === "sean") return raw;
-  return "alex";
-}
 
 function pickKey(tf: Timeframe, i: number) {
   return `${tf}:${i}`;
@@ -82,7 +94,7 @@ function fmtLong(d: Date) {
   return d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
 }
 
-/** Perfect-count helpers (rate calc for YTD bar) */
+/** Perfect-count helpers */
 function weeksElapsedYTD(now = new Date()) {
   return isoWeekNumber(now);
 }
@@ -95,7 +107,13 @@ function perfectCountYTD(tf: Timeframe, now = new Date()) {
   return 1;
 }
 
-type TeamYtd = { weekly: number; monthly: number; yearly: number; totalCompletions: number; totalPoints: number };
+type TeamYtd = {
+  weekly: number;
+  monthly: number;
+  yearly: number;
+  totalCompletions: number;
+  totalPoints: number;
+};
 
 type TeamHistoryRow = CompletionRow & {
   playerName: string;
@@ -107,7 +125,7 @@ type SlotStat = {
   timeframe: Timeframe;
   slot_index: number;
 
-  playerHandle: string | null;
+  playerId: string | null;
   playerName: string;
   playerAvatar: string | null;
 
@@ -126,10 +144,10 @@ function clampPct(x: number) {
 }
 
 export default function TeamPage() {
-  const [activeUser, setActiveUser] = useState<UserId>("alex");
+  const { loading: authLoading, userId, profile, leagueId } = useAuthedLeague();
 
-  const [nameByHandle, setNameByHandle] = useState<Record<string, string>>({});
-  const [avatarByHandle, setAvatarByHandle] = useState<Record<string, string>>({});
+  const [nameById, setNameById] = useState<Record<string, string>>({});
+  const [avatarById, setAvatarById] = useState<Record<string, string>>({});
 
   const [picksBySlot, setPicksBySlot] = useState<Record<string, PickRow | null>>({});
   const [tasksByKey, setTasksByKey] = useState<Record<string, TaskRow>>({});
@@ -148,17 +166,8 @@ export default function TeamPage() {
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState("");
 
-  useEffect(() => {
-    setActiveUser(getActiveUser());
-    const onChange = () => setActiveUser(getActiveUser());
-    window.addEventListener("fantasy-life:activeUserChanged", onChange);
-    return () => window.removeEventListener("fantasy-life:activeUserChanged", onChange);
-  }, []);
-
-  const managerName = useMemo(() => {
-    const fallback = activeUser.charAt(0).toUpperCase() + activeUser.slice(1);
-    return nameByHandle[activeUser] ?? fallback;
-  }, [activeUser, nameByHandle]);
+  const displayName = profile?.display_name ?? "Player";
+  const myAvatar = profile?.avatar_url ?? null;
 
   const seasonClock = useMemo(() => {
     const now = new Date();
@@ -182,44 +191,64 @@ export default function TeamPage() {
     return new Date(now.getFullYear(), 0, 1).toISOString();
   }, []);
 
-  // quick lookup for stat by slot (for rating meter)
-  const statBySlotKey = useMemo(() => {
-    const m = new Map<string, SlotStat>();
-    for (const s of slotStats) m.set(`${s.timeframe}:${s.slot_index}`, s);
-    return m;
-  }, [slotStats]);
+  const showName = (id: string | null) => {
+    if (!id) return "—";
+    return nameById[id] ?? id.slice(0, 6);
+  };
 
   useEffect(() => {
+    if (authLoading) return;
+    if (!leagueId || !userId) return;
+
     let cancelled = false;
 
     const load = async () => {
       setLoading(true);
       setMsg("");
 
-      // 1) Profiles
-      const profRes = await supabase.from("profiles").select("handle, display_name, avatar_url");
+      // 1) League members for names/avatars
+      const memRes = await supabase.from("league_members").select("user_id").eq("league_id", leagueId);
+      if (memRes.error) {
+        if (!cancelled) {
+          setMsg(memRes.error.message);
+          setLoading(false);
+        }
+        return;
+      }
+
+      const memberIds = (memRes.data ?? []).map((r: any) => r.user_id as string);
+
+      const profRes = await supabase
+        .from("profiles")
+        .select("id, display_name, avatar_url")
+        .in("id", memberIds);
+
       const localNames: Record<string, string> = {};
       const localAvatars: Record<string, string> = {};
+
       if (!profRes.error) {
         for (const r of (profRes.data ?? []) as ProfileRow[]) {
-          if (!r.handle) continue;
-          localNames[r.handle] = r.display_name || r.handle;
-          if (r.avatar_url) localAvatars[r.handle] = r.avatar_url;
+          localNames[r.id] = r.display_name || r.id.slice(0, 6);
+          if (r.avatar_url) localAvatars[r.id] = r.avatar_url;
         }
       }
-      if (cancelled) return;
-      setNameByHandle(localNames);
-      setAvatarByHandle(localAvatars);
 
-      // 2) Picks
+      if (cancelled) return;
+      setNameById(localNames);
+      setAvatarById(localAvatars);
+
+      // 2) Picks for this manager
       const pRes = await supabase
         .from("team_picks")
-        .select("manager_id,timeframe,slot_index,player_id")
-        .eq("manager_id", activeUser);
+        .select("league_id,manager_id,timeframe,slot_index,player_id")
+        .eq("league_id", leagueId)
+        .eq("manager_id", userId);
 
       if (pRes.error) {
-        if (!cancelled) setMsg(pRes.error.message);
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setMsg(pRes.error.message);
+          setLoading(false);
+        }
         return;
       }
 
@@ -234,10 +263,17 @@ export default function TeamPage() {
       setPicksBySlot(bySlot);
 
       const draftedPlayers = Array.from(new Set(picks.map((p) => p.player_id)));
+
       if (draftedPlayers.length === 0) {
         if (!cancelled) {
           setTasksByKey({});
-          setTeamYtd({ weekly: 0, monthly: 0, yearly: 0, totalCompletions: 0, totalPoints: 0 });
+          setTeamYtd({
+            weekly: 0,
+            monthly: 0,
+            yearly: 0,
+            totalCompletions: 0,
+            totalPoints: 0,
+          });
           setTeamHistory([]);
           setSlotStats([]);
           setLoading(false);
@@ -245,15 +281,18 @@ export default function TeamPage() {
         return;
       }
 
-      // 3) Tasks for display
+      // 3) Tasks for drafted players
       const tRes = await supabase
         .from("tasks")
-        .select("user_id,timeframe,slot_index,title,done_at")
+        .select("league_id,user_id,timeframe,slot_index,title,done_at")
+        .eq("league_id", leagueId)
         .in("user_id", draftedPlayers);
 
       if (tRes.error) {
-        if (!cancelled) setMsg(tRes.error.message);
-        if (!cancelled) setLoading(false);
+        if (!cancelled) {
+          setMsg(tRes.error.message);
+          setLoading(false);
+        }
         return;
       }
 
@@ -261,17 +300,19 @@ export default function TeamPage() {
       for (const t of (tRes.data ?? []) as TaskRow[]) {
         tmap[taskKey(t.user_id, t.timeframe, t.slot_index)] = t;
       }
+
       if (cancelled) return;
       setTasksByKey(tmap);
 
-      // 4) History YTD
+      // 4) YTD history for drafted players in this league
       const cRes = await supabase
         .from("task_completions")
-        .select("id,user_id,timeframe,slot_index,title,completed_at")
+        .select("id,league_id,user_id,timeframe,slot_index,title,completed_at")
+        .eq("league_id", leagueId)
         .in("user_id", draftedPlayers)
         .gte("completed_at", startOfYearISO)
         .order("completed_at", { ascending: false })
-        .limit(800);
+        .limit(1000);
 
       if (cRes.error) {
         if (!cancelled) setLoading(false);
@@ -283,7 +324,14 @@ export default function TeamPage() {
 
       const now = new Date();
 
-      const y: TeamYtd = { weekly: 0, monthly: 0, yearly: 0, totalCompletions: 0, totalPoints: 0 };
+      const y: TeamYtd = {
+        weekly: 0,
+        monthly: 0,
+        yearly: 0,
+        totalCompletions: 0,
+        totalPoints: 0,
+      };
+
       const filteredHistory: TeamHistoryRow[] = [];
       const slotCountMap = new Map<string, number>();
 
@@ -302,7 +350,7 @@ export default function TeamPage() {
 
         filteredHistory.push({
           ...row,
-          playerName: localNames[row.user_id] ?? row.user_id,
+          playerName: localNames[row.user_id] ?? row.user_id.slice(0, 6),
           playerAvatar: localAvatars[row.user_id] ?? null,
           pts,
         });
@@ -314,13 +362,13 @@ export default function TeamPage() {
       (["weekly", "monthly", "yearly"] as Timeframe[]).forEach((tf) => {
         for (let i = 0; i < SLOT_COUNTS[tf]; i++) {
           const pick = bySlot[pickKey(tf, i)];
-          const playerHandle = pick?.player_id ?? null;
+          const playerId = pick?.player_id ?? null;
 
-          const playerName = playerHandle ? localNames[playerHandle] ?? playerHandle : "—";
-          const playerAvatar = playerHandle ? localAvatars[playerHandle] ?? null : null;
+          const playerName = playerId ? localNames[playerId] ?? playerId.slice(0, 6) : "—";
+          const playerAvatar = playerId ? localAvatars[playerId] ?? null : null;
 
-          const key = playerHandle ? `${playerHandle}|${tf}|${i}` : "";
-          const completions = playerHandle ? slotCountMap.get(key) ?? 0 : 0;
+          const key = playerId ? `${playerId}|${tf}|${i}` : "";
+          const completions = playerId ? slotCountMap.get(key) ?? 0 : 0;
 
           const perfect = perfectCountYTD(tf, now);
           const completionRate = perfect > 0 ? completions / perfect : 0;
@@ -328,14 +376,14 @@ export default function TeamPage() {
           const points = completions * POINTS[tf];
 
           const currentTaskTitle =
-            playerHandle && tmap[taskKey(playerHandle, tf, i)]?.title
-              ? tmap[taskKey(playerHandle, tf, i)]!.title
+            playerId && tmap[taskKey(playerId, tf, i)]?.title
+              ? tmap[taskKey(playerId, tf, i)]!.title
               : `(${tfLabel(tf)})`;
 
           stats.push({
             timeframe: tf,
             slot_index: i,
-            playerHandle,
+            playerId,
             playerName,
             playerAvatar,
             taskTitle: currentTaskTitle,
@@ -359,7 +407,7 @@ export default function TeamPage() {
     return () => {
       cancelled = true;
     };
-  }, [activeUser, startOfYearISO]);
+  }, [authLoading, leagueId, userId, startOfYearISO]);
 
   const totalPointsNow = useMemo(() => {
     let sum = 0;
@@ -373,6 +421,12 @@ export default function TeamPage() {
     }
     return sum;
   }, [picksBySlot, tasksByKey]);
+
+  const statBySlotKey = useMemo(() => {
+    const m = new Map<string, SlotStat>();
+    for (const s of slotStats) m.set(`${s.timeframe}:${s.slot_index}`, s);
+    return m;
+  }, [slotStats]);
 
   function RatingMeter({ tf, pct }: { tf: Timeframe; pct: number }) {
     const h = clampPct(pct);
@@ -392,11 +446,11 @@ export default function TeamPage() {
     const p = picksBySlot[pickKey(tf, i)];
     const empty = !p;
 
-    const playerHandle = p?.player_id ?? "";
-    const playerName = playerHandle ? nameByHandle[playerHandle] ?? playerHandle : "Empty";
-    const avatar = playerHandle ? avatarByHandle[playerHandle] : null;
+    const playerId = p?.player_id ?? "";
+    const playerName = playerId ? showName(playerId) : "Empty";
+    const avatar = playerId ? avatarById[playerId] ?? null : null;
 
-    const task = p ? tasksByKey[taskKey(playerHandle, tf, i)] : null;
+    const task = p ? tasksByKey[taskKey(playerId, tf, i)] : null;
     const title = task?.title ?? (empty ? "Draft a friend’s goal" : tfLabel(tf));
     const done = !!task?.done_at;
 
@@ -422,19 +476,13 @@ export default function TeamPage() {
 
         <div className="mt-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <Avatar src={avatar} alt={playerName} size={48} />
+            <Avatar src={avatar} alt={playerName} size={56} />
             <div className="min-w-0">
               <div className="text-base font-black text-slate-900">{playerName}</div>
-              <div className="text-xs text-slate-500">{empty ? "No player drafted" : tfLabel(tf)}</div>
             </div>
           </div>
 
-          {/* rating meter (YTD completion rate for this slot) */}
-          {empty ? (
-            <div className="text-xs font-bold text-slate-400">—</div>
-          ) : (
-            <RatingMeter tf={tf} pct={pct} />
-          )}
+          {empty ? <div className="text-xs font-bold text-slate-400">—</div> : <RatingMeter tf={tf} pct={pct} />}
         </div>
 
         <div
@@ -483,7 +531,7 @@ export default function TeamPage() {
         <tbody className="divide-y divide-slate-200 bg-white">
           {slotStats.map((s) => {
             const pct = clampPct(s.completionRate * 100);
-            const isEmpty = !s.playerHandle;
+            const isEmpty = !s.playerId;
             const barColor = s.timeframe === "weekly" ? "bg-sky-500" : s.timeframe === "monthly" ? "bg-indigo-500" : "bg-amber-500";
 
             return (
@@ -500,7 +548,6 @@ export default function TeamPage() {
                     <Avatar src={s.playerAvatar} alt={s.playerName} size={28} />
                     <div className="min-w-0">
                       <div className="font-semibold text-slate-900">{s.playerName}</div>
-                      <div className="text-xs text-slate-500">{s.playerHandle ?? "—"}</div>
                     </div>
                   </div>
                 </td>
@@ -528,7 +575,7 @@ export default function TeamPage() {
           {slotStats.length === 0 && (
             <tr>
               <td className="px-4 py-4 text-slate-600" colSpan={5}>
-                No drafted slots yet (or no history).
+                No drafted slots yet.
               </td>
             </tr>
           )}
@@ -666,6 +713,8 @@ export default function TeamPage() {
     </div>
   );
 
+  if (authLoading) return null;
+
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-5xl px-5 py-8">
@@ -678,9 +727,9 @@ export default function TeamPage() {
           <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
             <div className="text-right">
               <div className="text-xs font-semibold text-slate-600">Manager</div>
-              <div className="text-sm font-bold text-slate-900">{managerName}</div>
+              <div className="text-sm font-bold text-slate-900">{displayName}</div>
             </div>
-            <Avatar src={avatarByHandle[activeUser]} alt={managerName} size={40} />
+            <Avatar src={myAvatar} alt={displayName} size={40} />
             <div className="ml-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-bold text-emerald-800">
               {totalPointsNow} pts
             </div>
@@ -705,7 +754,6 @@ export default function TeamPage() {
           <div className="mt-4 rounded-2xl border border-red-200 bg-white p-4 text-sm text-red-700">{msg}</div>
         )}
 
-        {/* Formation: keep ONLY the soccer field container */}
         <div className="mt-6">
           <div className="relative mx-auto max-w-3xl overflow-hidden rounded-3xl border border-emerald-200 bg-emerald-100/40 p-5 shadow-sm">
             <div className="pointer-events-none absolute inset-0">
@@ -714,7 +762,7 @@ export default function TeamPage() {
             </div>
 
             {loading ? (
-              <div className="relative text-sm text-slate-600">Loading…</div>
+              <div className="relative text-sm text-slate-600">Loading...</div>
             ) : (
               <div className="relative grid gap-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

@@ -22,9 +22,18 @@ export default function JoinPage() {
   const [msg, setMsg] = useState("");
 
   useEffect(() => {
+    let mounted = true;
+
     const run = async () => {
-      const { data } = await supabase.auth.getUser();
-      if (!data.user) {
+      setLoading(true);
+      setMsg("");
+
+      const { data, error } = await supabase.auth.getUser();
+
+      if (!mounted) return;
+
+      if (error || !data.user) {
+        setLoading(false);
         router.replace("/login");
         return;
       }
@@ -37,7 +46,9 @@ export default function JoinPage() {
         .eq("id", data.user.id)
         .single();
 
-      if (profRes.data?.active_league_id) {
+      if (!mounted) return;
+
+      if (!profRes.error && profRes.data?.active_league_id) {
         router.replace("/tasks");
         return;
       }
@@ -46,6 +57,10 @@ export default function JoinPage() {
     };
 
     run();
+
+    return () => {
+      mounted = false;
+    };
   }, [router]);
 
   const setActiveLeague = async (leagueId: string) => {
@@ -58,7 +73,8 @@ export default function JoinPage() {
   };
 
   const createLeague = async () => {
-    setMsg("");
+    if (!userId) return;
+    setMsg("Creating league...");
 
     try {
       const code = makeJoinCode();
@@ -68,7 +84,7 @@ export default function JoinPage() {
         .insert({
           name: leagueName.trim() || "My League",
           join_code: code,
-          created_by: userId!,
+          created_by: userId,
         })
         .select("id, join_code")
         .single();
@@ -79,11 +95,12 @@ export default function JoinPage() {
 
       const memRes = await supabase.from("league_members").insert({
         league_id: leagueId,
-        user_id: userId!,
+        user_id: userId,
       });
       if (memRes.error) throw memRes.error;
 
       await setActiveLeague(leagueId);
+
       router.replace("/tasks");
     } catch (e: any) {
       setMsg(e.message ?? "Failed to create league");
@@ -91,11 +108,15 @@ export default function JoinPage() {
   };
 
   const joinLeague = async () => {
-    setMsg("");
+    if (!userId) return;
+    setMsg("Joining league...");
 
     try {
       const code = joinCode.trim().toUpperCase();
-      if (!code) return;
+      if (!code) {
+        setMsg("Enter a join code.");
+        return;
+      }
 
       const leagueRes = await supabase
         .from("leagues")
@@ -109,65 +130,72 @@ export default function JoinPage() {
 
       const memRes = await supabase.from("league_members").upsert({
         league_id: leagueId,
-        user_id: userId!,
+        user_id: userId,
       });
       if (memRes.error) throw memRes.error;
 
       await setActiveLeague(leagueId);
+
       router.replace("/tasks");
     } catch (e: any) {
       setMsg(e.message ?? "Failed to join league");
     }
   };
 
-  if (loading) return null;
-
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-xl px-5 py-10">
         <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
           <h1 className="text-2xl font-black">Join a league</h1>
-          <p className="mt-1 text-sm text-slate-600">Create a new game or join one with a code.</p>
+          <p className="mt-1 text-sm text-slate-600">
+            Create a new game or join one with a code.
+          </p>
 
-          <div className="mt-6 grid gap-6">
-            <div className="rounded-2xl border border-slate-200 p-4">
-              <div className="text-sm font-black">Create new league</div>
-              <div className="mt-3 flex gap-2">
-                <input
-                  className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold outline-none"
-                  value={leagueName}
-                  onChange={(e) => setLeagueName(e.target.value)}
-                  placeholder="League name"
-                />
-                <button
-                  type="button"
-                  onClick={createLeague}
-                  className="rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-black text-white"
-                >
-                  Create
-                </button>
+          {loading ? (
+            <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              Loading...
+            </div>
+          ) : (
+            <div className="mt-6 grid gap-6">
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <div className="text-sm font-black">Create new league</div>
+                <div className="mt-3 flex gap-2">
+                  <input
+                    className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold outline-none"
+                    value={leagueName}
+                    onChange={(e) => setLeagueName(e.target.value)}
+                    placeholder="League name"
+                  />
+                  <button
+                    type="button"
+                    onClick={createLeague}
+                    className="rounded-2xl bg-emerald-600 px-4 py-3 text-sm font-black text-white"
+                  >
+                    Create
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 p-4">
+                <div className="text-sm font-black">Join existing league</div>
+                <div className="mt-3 flex gap-2">
+                  <input
+                    className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold uppercase outline-none"
+                    value={joinCode}
+                    onChange={(e) => setJoinCode(e.target.value)}
+                    placeholder="Join code"
+                  />
+                  <button
+                    type="button"
+                    onClick={joinLeague}
+                    className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-black text-white"
+                  >
+                    Join
+                  </button>
+                </div>
               </div>
             </div>
-
-            <div className="rounded-2xl border border-slate-200 p-4">
-              <div className="text-sm font-black">Join existing league</div>
-              <div className="mt-3 flex gap-2">
-                <input
-                  className="flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold uppercase outline-none"
-                  value={joinCode}
-                  onChange={(e) => setJoinCode(e.target.value)}
-                  placeholder="Join code"
-                />
-                <button
-                  type="button"
-                  onClick={joinLeague}
-                  className="rounded-2xl bg-slate-900 px-4 py-3 text-sm font-black text-white"
-                >
-                  Join
-                </button>
-              </div>
-            </div>
-          </div>
+          )}
 
           {msg && (
             <div className="mt-5 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
