@@ -11,8 +11,10 @@ import {
   timeframePanelClass,
   timeframeAccentTextClass,
 } from "../components/TimeframeUI";
+import { useAuthedLeague } from "../components/useAuthedLeague";
 
 type TaskRow = {
+  league_id: string;
   user_id: string;
   timeframe: Timeframe;
   slot_index: number;
@@ -20,30 +22,15 @@ type TaskRow = {
   done_at: string | null;
 };
 
-type ProfileRow = {
-  handle: string | null;
-  display_name: string | null;
-  avatar_url: string | null;
-};
-
 type CompletionRow = {
   id: number;
+  league_id: string;
   user_id: string;
   timeframe: string;
   slot_index: number;
   title: string | null;
   completed_at: string;
 };
-
-type UserId = "alex" | "bob" | "jeff" | "sean";
-const ACTIVE_USER_KEY = "fantasy-life:activeUser";
-
-function getActiveUser(): UserId {
-  if (typeof window === "undefined") return "alex";
-  const raw = localStorage.getItem(ACTIVE_USER_KEY);
-  if (raw === "alex" || raw === "bob" || raw === "jeff" || raw === "sean") return raw;
-  return "alex";
-}
 
 const SLOT_COUNTS: Record<Timeframe, number> = { weekly: 3, monthly: 2, yearly: 2 };
 const POINTS: Record<Timeframe, number> = { weekly: 1, monthly: 4, yearly: 40 };
@@ -52,7 +39,6 @@ function slotKey(tf: Timeframe, i: number) {
   return `${tf}:${i}`;
 }
 
-/** ---- Time helpers (ISO week + grouping) ---- */
 function startOfDay(d: Date) {
   const x = new Date(d);
   x.setHours(0, 0, 0, 0);
@@ -89,8 +75,6 @@ function fmtShort(d: Date) {
 function fmtLong(d: Date) {
   return d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
 }
-
-/** Perfect-count helpers (YTD completion-rate meter) */
 function weeksElapsedYTD(now = new Date()) {
   return isoWeekNumber(now);
 }
@@ -102,6 +86,10 @@ function perfectCountYTD(tf: Timeframe, now = new Date()) {
   if (tf === "monthly") return monthsElapsedYTD(now);
   return 1;
 }
+function clampPct(x: number) {
+  if (isNaN(x) || !isFinite(x)) return 0;
+  return Math.max(0, Math.min(100, Math.round(x)));
+}
 
 type YtdCounts = { weekly: number; monthly: number; yearly: number; total: number };
 
@@ -109,30 +97,20 @@ type SlotStat = {
   timeframe: Timeframe;
   slot_index: number;
   taskTitle: string;
-
   completions: number;
   perfect: number;
   completionRate: number;
-
   points: number;
 };
 
-function clampPct(x: number) {
-  if (isNaN(x) || !isFinite(x)) return 0;
-  return Math.max(0, Math.min(100, Math.round(x)));
-}
-
 export default function TasksPage() {
-  const [activeUser, setActiveUser] = useState<UserId>("alex");
+  const { loading: authLoading, userId, profile, leagueId } = useAuthedLeague();
 
   const [tasks, setTasks] = useState<Record<string, TaskRow>>({});
   const [draftTitles, setDraftTitles] = useState<Record<string, string>>({});
 
-  const [nameByHandle, setNameByHandle] = useState<Record<string, string>>({});
-  const [avatarByHandle, setAvatarByHandle] = useState<Record<string, string>>({});
-
   const [loading, setLoading] = useState(true);
-  const [msg, setMsg] = useState<string>("");
+  const [msg, setMsg] = useState("");
 
   const [ytd, setYtd] = useState<YtdCounts>({ weekly: 0, monthly: 0, yearly: 0, total: 0 });
   const [history, setHistory] = useState<CompletionRow[]>([]);
@@ -141,17 +119,8 @@ export default function TasksPage() {
 
   const loadingRef = useRef(false);
 
-  useEffect(() => {
-    setActiveUser(getActiveUser());
-    const onChange = () => setActiveUser(getActiveUser());
-    window.addEventListener("fantasy-life:activeUserChanged", onChange);
-    return () => window.removeEventListener("fantasy-life:activeUserChanged", onChange);
-  }, []);
-
-  const displayName = useMemo(() => {
-    const fallback = activeUser.charAt(0).toUpperCase() + activeUser.slice(1);
-    return nameByHandle[activeUser] ?? fallback;
-  }, [activeUser, nameByHandle]);
+  const displayName = profile?.display_name ?? "Player";
+  const avatarUrl = profile?.avatar_url ?? null;
 
   const seasonClock = useMemo(() => {
     const now = new Date();
@@ -181,13 +150,16 @@ export default function TasksPage() {
     return m;
   }, [slotStats]);
 
-  const loadYTDHistoryAndStats = async (userHandle: string, taskMap: Record<string, TaskRow>) => {
+  const loadYTDHistoryAndStats = async (taskMap: Record<string, TaskRow>) => {
+    if (!leagueId || !userId) return;
+
     setHistoryLoading(true);
 
     const res = await supabase
       .from("task_completions")
-      .select("id,user_id,timeframe,slot_index,title,completed_at")
-      .eq("user_id", userHandle)
+      .select("id,league_id,user_id,timeframe,slot_index,title,completed_at")
+      .eq("league_id", leagueId)
+      .eq("user_id", userId)
       .gte("completed_at", startOfYearISO)
       .order("completed_at", { ascending: false })
       .limit(500);
@@ -201,7 +173,7 @@ export default function TasksPage() {
     setHistory(rows);
 
     const counts: YtdCounts = { weekly: 0, monthly: 0, yearly: 0, total: 0 };
-    const countMap = new Map<string, number>(); // tf|slot -> completions
+    const countMap = new Map<string, number>();
 
     for (const r of rows) {
       const tf = r.timeframe as Timeframe;
@@ -223,7 +195,6 @@ export default function TasksPage() {
         const perfect = perfectCountYTD(tf, now);
         const completionRate = perfect > 0 ? completions / perfect : 0;
         const points = completions * POINTS[tf];
-
         const title = taskMap[slotKey(tf, i)]?.title ?? tfLabel(tf);
 
         stats.push({
@@ -243,6 +214,9 @@ export default function TasksPage() {
   };
 
   useEffect(() => {
+    if (authLoading) return;
+    if (!leagueId || !userId) return;
+
     let cancelled = false;
 
     const load = async () => {
@@ -252,25 +226,11 @@ export default function TasksPage() {
       setLoading(true);
       setMsg("");
 
-      const profRes = await supabase.from("profiles").select("handle, display_name, avatar_url");
-      if (!profRes.error) {
-        const nb: Record<string, string> = {};
-        const ab: Record<string, string> = {};
-        for (const r of (profRes.data ?? []) as ProfileRow[]) {
-          if (!r.handle) continue;
-          nb[r.handle] = r.display_name || r.handle;
-          if (r.avatar_url) ab[r.handle] = r.avatar_url;
-        }
-        if (!cancelled) {
-          setNameByHandle(nb);
-          setAvatarByHandle(ab);
-        }
-      }
-
       const tRes = await supabase
         .from("tasks")
-        .select("user_id,timeframe,slot_index,title,done_at")
-        .eq("user_id", activeUser);
+        .select("league_id,user_id,timeframe,slot_index,title,done_at")
+        .eq("league_id", leagueId)
+        .eq("user_id", userId);
 
       if (tRes.error) {
         if (!cancelled) {
@@ -291,11 +251,16 @@ export default function TasksPage() {
           const k = slotKey(tf, i);
           if (!map[k]) {
             map[k] = {
-              user_id: activeUser,
+              league_id: leagueId,
+              user_id: userId,
               timeframe: tf,
               slot_index: i,
               title:
-                tf === "weekly" ? `Weekly goal ${i + 1}` : tf === "monthly" ? `Monthly goal ${i + 1}` : `Yearly goal ${i + 1}`,
+                tf === "weekly"
+                  ? `Weekly goal ${i + 1}`
+                  : tf === "monthly"
+                  ? `Monthly goal ${i + 1}`
+                  : `Yearly goal ${i + 1}`,
               done_at: null,
             };
           }
@@ -318,7 +283,7 @@ export default function TasksPage() {
       }
       setDraftTitles(dt);
 
-      await loadYTDHistoryAndStats(activeUser, map);
+      await loadYTDHistoryAndStats(map);
 
       if (!cancelled) setLoading(false);
       loadingRef.current = false;
@@ -330,13 +295,15 @@ export default function TasksPage() {
       cancelled = true;
       loadingRef.current = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeUser, startOfYearISO]);
+  }, [authLoading, leagueId, userId, startOfYearISO]);
 
   const saveTitleOnBlur = async (tf: Timeframe, i: number) => {
+    if (!leagueId || !userId) return;
+
     const k = slotKey(tf, i);
     const cur = tasks[k];
     const title = (draftTitles[k] ?? "").trim();
+
     if (!cur) return;
     if (title.length === 0) return;
     if (title === cur.title) return;
@@ -347,16 +314,25 @@ export default function TasksPage() {
     const { error } = await supabase
       .from("tasks")
       .upsert(
-        { user_id: activeUser, timeframe: tf, slot_index: i, title: next.title, done_at: next.done_at },
-        { onConflict: "user_id,timeframe,slot_index" }
+        {
+          league_id: leagueId,
+          user_id: userId,
+          timeframe: tf,
+          slot_index: i,
+          title: next.title,
+          done_at: next.done_at,
+        },
+        { onConflict: "league_id,user_id,timeframe,slot_index" }
       );
 
     if (error) setMsg(error.message);
 
-    await loadYTDHistoryAndStats(activeUser, { ...tasks, [k]: next });
+    await loadYTDHistoryAndStats({ ...tasks, [k]: next });
   };
 
   const toggleDone = async (tf: Timeframe, i: number) => {
+    if (!leagueId || !userId) return;
+
     const k = slotKey(tf, i);
     const cur = tasks[k];
     if (!cur) return;
@@ -370,8 +346,15 @@ export default function TasksPage() {
     const { error } = await supabase
       .from("tasks")
       .upsert(
-        { user_id: activeUser, timeframe: tf, slot_index: i, title: next.title, done_at: next.done_at },
-        { onConflict: "user_id,timeframe,slot_index" }
+        {
+          league_id: leagueId,
+          user_id: userId,
+          timeframe: tf,
+          slot_index: i,
+          title: next.title,
+          done_at: next.done_at,
+        },
+        { onConflict: "league_id,user_id,timeframe,slot_index" }
       );
 
     if (error) {
@@ -382,21 +365,24 @@ export default function TasksPage() {
 
     if (markingDone) {
       const ins = await supabase.from("task_completions").insert({
-        user_id: activeUser,
+        league_id: leagueId,
+        user_id: userId,
         timeframe: tf,
         slot_index: i,
         title: next.title,
         completed_at: newDoneAt,
       });
+
       if (ins.error) setMsg(ins.error.message);
     }
 
-    await loadYTDHistoryAndStats(activeUser, { ...tasks, [k]: next });
+    await loadYTDHistoryAndStats({ ...tasks, [k]: next });
   };
 
   function RatingMeter({ tf, pct }: { tf: Timeframe; pct: number }) {
     const h = clampPct(pct);
     const barColor = tf === "weekly" ? "bg-sky-500" : tf === "monthly" ? "bg-indigo-500" : "bg-amber-500";
+
     return (
       <div className="flex items-center gap-2">
         <div className="relative h-10 w-3 overflow-hidden rounded-full border border-slate-200 bg-white">
@@ -414,9 +400,6 @@ export default function TasksPage() {
 
     const s = statsBySlot.get(`${tf}:${i}`) ?? null;
     const pct = s ? s.completionRate * 100 : 0;
-
-    // bigger + centered "player icon" for *My Tasks*
-    const myAvatar = avatarByHandle[activeUser] ?? null;
 
     return (
       <div className={["rounded-2xl border border-slate-200 bg-white/95 p-3 shadow-sm transition", done ? "ring-1 ring-emerald-200" : "hover:bg-slate-50"].join(" ")}>
@@ -436,10 +419,9 @@ export default function TasksPage() {
           </button>
         </div>
 
-        {/* Avatar + rating only (no extra text) */}
         <div className="mt-3 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <Avatar src={myAvatar} alt={displayName} size={56} />
+            <Avatar src={avatarUrl} alt={displayName} size={56} />
             <div className="min-w-0">
               <div className="text-sm font-black text-slate-900">{displayName}</div>
             </div>
@@ -459,7 +441,7 @@ export default function TasksPage() {
             "mt-3 w-full rounded-xl border px-3 py-2 text-sm font-semibold outline-none",
             done ? "border-emerald-200 bg-white/60 text-slate-700" : "border-slate-200 bg-white text-slate-900",
           ].join(" ")}
-          placeholder="Set your goal…"
+          placeholder="Set your goal..."
         />
       </div>
     );
@@ -580,7 +562,7 @@ export default function TasksPage() {
       <div className="mt-8">
         <div className="flex items-center justify-between gap-3">
           <div className="text-sm font-bold text-slate-900">History (by week)</div>
-          <div className="text-xs text-slate-500">{historyLoading ? "Loading…" : `Showing up to ${history.length}`}</div>
+          <div className="text-xs text-slate-500">{historyLoading ? "Loading..." : `Showing up to ${history.length}`}</div>
         </div>
 
         <div className="mt-3 overflow-hidden rounded-2xl border border-slate-200">
@@ -649,6 +631,8 @@ export default function TasksPage() {
     </div>
   );
 
+  if (authLoading) return null;
+
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-5xl px-5 py-8">
@@ -659,7 +643,7 @@ export default function TasksPage() {
           </div>
 
           <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-3 py-2 shadow-sm">
-            <Avatar src={avatarByHandle[activeUser]} alt={displayName} size={56} />
+            <Avatar src={avatarUrl} alt={displayName} size={56} />
             <div className="text-right">
               <div className="text-xs font-semibold text-slate-600">Player</div>
               <div className="text-sm font-bold text-slate-900">{displayName}</div>
@@ -681,11 +665,8 @@ export default function TasksPage() {
           </div>
         </div>
 
-        {msg && (
-          <div className="mt-4 rounded-2xl border border-red-200 bg-white p-4 text-sm text-red-700">{msg}</div>
-        )}
+        {msg && <div className="mt-4 rounded-2xl border border-red-200 bg-white p-4 text-sm text-red-700">{msg}</div>}
 
-        {/* Formation: ONLY the soccer field */}
         <div className="mt-6">
           <div className="relative mx-auto max-w-3xl overflow-hidden rounded-3xl border border-emerald-200 bg-emerald-100/40 p-5 shadow-sm">
             <div className="pointer-events-none absolute inset-0">
@@ -694,7 +675,7 @@ export default function TasksPage() {
             </div>
 
             {loading ? (
-              <div className="relative text-sm text-slate-600">Loading…</div>
+              <div className="relative text-sm text-slate-600">Loading...</div>
             ) : (
               <div className="relative grid gap-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

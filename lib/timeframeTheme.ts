@@ -1,4 +1,4 @@
-// src/app/lib/timeframeTheme.ts
+// src/lib/timeframeTheme.ts
 export type Timeframe = "weekly" | "monthly" | "yearly";
 
 export function tfLabel(tf: Timeframe) {
@@ -17,7 +17,7 @@ export const TF_THEME: Record<
     panel: string;
     badge: string;
     dot: string;
-    hoverCard: string; // stable hover, no ring flicker
+    hoverCard: string; // stable hover (no rings)
     button: string;
     accentText: string;
   }
@@ -39,7 +39,7 @@ export const TF_THEME: Record<
     accentText: "text-indigo-700",
   },
   yearly: {
-    // ⭐ Special long-term vibe: gold/amber
+    // Special long-term vibe: gold/amber (no sparkles)
     panel: "border-amber-200 bg-gradient-to-b from-amber-50/90 to-yellow-50/60",
     badge: "border-amber-200 bg-amber-50 text-amber-950",
     dot: "bg-amber-500",

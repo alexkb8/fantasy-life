@@ -9,9 +9,7 @@ import {
   timeframeCardClass,
   timeframePanelClass,
 } from "../components/TimeframeUI";
-
-const LEAGUE_ID = "default";
-const ACTIVE_USER_KEY = "fantasy-life:activeUser";
+import { useAuthedLeague } from "../components/useAuthedLeague";
 
 const SLOT_COUNTS: Record<Timeframe, number> = { weekly: 3, monthly: 2, yearly: 2 };
 const PICKS_PER_MANAGER = 7;
@@ -26,6 +24,7 @@ type DraftState = {
 type LeagueMember = { league_id: string; user_id: string };
 
 type TaskRow = {
+  league_id: string;
   user_id: string;
   timeframe: Timeframe;
   slot_index: number;
@@ -43,10 +42,11 @@ type DraftPick = {
   created_at: string;
 };
 
-function getActiveUser(): string {
-  if (typeof window === "undefined") return "alex";
-  return localStorage.getItem(ACTIVE_USER_KEY) || "alex";
-}
+type ProfileRow = {
+  id: string;
+  display_name: string | null;
+  avatar_url: string | null;
+};
 
 function snakeManager(membersAsc: string[], pickNumber: number) {
   const n = membersAsc.length;
@@ -77,12 +77,14 @@ function lookupGoalTitle(tasks: TaskRow[], draftedUserId: string, tf: Timeframe,
 }
 
 export default function DraftPage() {
-  const [activeUser, setActiveUser] = useState("alex");
+  const { loading: authLoading, userId, leagueId } = useAuthedLeague();
 
   const [members, setMembers] = useState<string[]>([]);
   const [state, setState] = useState<DraftState | null>(null);
   const [tasks, setTasks] = useState<TaskRow[]>([]);
   const [picks, setPicks] = useState<DraftPick[]>([]);
+
+  const [nameById, setNameById] = useState<Record<string, string>>({});
 
   const [err, setErr] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
@@ -101,33 +103,40 @@ export default function DraftPage() {
   const draftOrderScrollEl = useRef<HTMLDivElement | null>(null);
   const draftOrderScrollTop = useRef<number>(0);
 
-  useEffect(() => {
-    setActiveUser(getActiveUser());
-    const onChange = () => setActiveUser(getActiveUser());
-    window.addEventListener("fantasy-life:activeUserChanged", onChange);
-    return () => window.removeEventListener("fantasy-life:activeUserChanged", onChange);
-  }, []);
-
   // ---- Fetch helpers ----
   const fetchMembers = async () => {
-    const res = await supabase.from("league_members").select("league_id,user_id").eq("league_id", LEAGUE_ID);
+    const res = await supabase.from("league_members").select("league_id,user_id").eq("league_id", leagueId);
     if (res.error) throw res.error;
     const ids = ((res.data ?? []) as LeagueMember[]).map((x) => x.user_id).sort();
     setMembers(ids);
+  };
+
+  const fetchProfiles = async () => {
+    // Pull all profiles and filter locally by member list (simple)
+    const res = await supabase.from("profiles").select("id,display_name");
+    if (res.error) return;
+    const map: Record<string, string> = {};
+    for (const p of (res.data ?? []) as ProfileRow[]) {
+      map[p.id] = p.display_name || p.id.slice(0, 6);
+    }
+    setNameById(map);
   };
 
   const fetchState = async () => {
     const res = await supabase
       .from("draft_state")
       .select("league_id,status,pick_number,pick_deadline")
-      .eq("league_id", LEAGUE_ID)
+      .eq("league_id", leagueId)
       .single();
     if (res.error) throw res.error;
     setState((res.data as DraftState) ?? null);
   };
 
   const fetchTasks = async () => {
-    const res = await supabase.from("tasks").select("user_id,timeframe,slot_index,title,done_at");
+    const res = await supabase
+      .from("tasks")
+      .select("league_id,user_id,timeframe,slot_index,title,done_at")
+      .eq("league_id", leagueId);
     if (res.error) throw res.error;
     setTasks((res.data ?? []) as TaskRow[]);
   };
@@ -136,7 +145,7 @@ export default function DraftPage() {
     const res = await supabase
       .from("draft_picks")
       .select("league_id,pick_number,manager_id,drafted_user_id,timeframe,slot_index,created_at")
-      .eq("league_id", LEAGUE_ID)
+      .eq("league_id", leagueId)
       .order("pick_number", { ascending: true });
     if (res.error) throw res.error;
     setPicks((res.data ?? []) as DraftPick[]);
@@ -146,7 +155,7 @@ export default function DraftPage() {
     setErr("");
     setStatusMsg("");
     try {
-      await Promise.all([fetchMembers(), fetchState(), fetchTasks(), fetchPicks()]);
+      await Promise.all([fetchMembers(), fetchProfiles(), fetchState(), fetchTasks(), fetchPicks()]);
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     }
@@ -154,6 +163,9 @@ export default function DraftPage() {
 
   // ---- Realtime subscriptions ----
   useEffect(() => {
+    if (authLoading) return;
+    if (!leagueId || !userId) return;
+
     let cancelled = false;
 
     const setupRealtime = async () => {
@@ -171,7 +183,7 @@ export default function DraftPage() {
         .channel("fantasy-life:draft_state")
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: "draft_state", filter: `league_id=eq.${LEAGUE_ID}` },
+          { event: "*", schema: "public", table: "draft_state", filter: `league_id=eq.${leagueId}` },
           () => fetchState().catch((e: any) => setErr(String(e?.message ?? e)))
         )
         .subscribe();
@@ -180,15 +192,17 @@ export default function DraftPage() {
         .channel("fantasy-life:draft_picks")
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: "draft_picks", filter: `league_id=eq.${LEAGUE_ID}` },
+          { event: "*", schema: "public", table: "draft_picks", filter: `league_id=eq.${leagueId}` },
           () => fetchPicks().catch((e: any) => setErr(String(e?.message ?? e)))
         )
         .subscribe();
 
       const chTasks = supabase
         .channel("fantasy-life:tasks")
-        .on("postgres_changes", { event: "*", schema: "public", table: "tasks" }, () =>
-          fetchTasks().catch((e: any) => setErr(String(e?.message ?? e)))
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "tasks", filter: `league_id=eq.${leagueId}` },
+          () => fetchTasks().catch((e: any) => setErr(String(e?.message ?? e)))
         )
         .subscribe();
 
@@ -196,7 +210,7 @@ export default function DraftPage() {
         .channel("fantasy-life:league_members")
         .on(
           "postgres_changes",
-          { event: "*", schema: "public", table: "league_members", filter: `league_id=eq.${LEAGUE_ID}` },
+          { event: "*", schema: "public", table: "league_members", filter: `league_id=eq.${leagueId}` },
           () => fetchMembers().catch((e: any) => setErr(String(e?.message ?? e)))
         )
         .subscribe();
@@ -218,7 +232,7 @@ export default function DraftPage() {
       })();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [authLoading, leagueId, userId]);
 
   // Restore draft order scroll position after rerenders
   useEffect(() => {
@@ -229,6 +243,9 @@ export default function DraftPage() {
       if (draftOrderScrollEl.current) draftOrderScrollEl.current.scrollTop = desired;
     });
   }, [picks.length, members.length, state?.pick_number, state?.status, nowTick]);
+
+  const me = userId!;
+  const showName = (id: string) => nameById[id] ?? id.slice(0, 6);
 
   // ---- Derived ----
   const totalPicks = useMemo(() => members.length * PICKS_PER_MANAGER, [members.length]);
@@ -269,7 +286,7 @@ export default function DraftPage() {
   }, [tasks, members]);
 
   const myRoster = useMemo(() => {
-    const mine = picks.filter((p) => p.manager_id === activeUser).sort((a, b) => a.pick_number - b.pick_number);
+    const mine = picks.filter((p) => p.manager_id === me).sort((a, b) => a.pick_number - b.pick_number);
 
     const roster: {
       timeframe: Timeframe;
@@ -296,7 +313,7 @@ export default function DraftPage() {
     }
 
     return roster;
-  }, [picks, activeUser, tasks]);
+  }, [picks, me, tasks]);
 
   const remainingSlots = useMemo(() => {
     const rem: Record<Timeframe, number> = { weekly: 0, monthly: 0, yearly: 0 };
@@ -308,9 +325,9 @@ export default function DraftPage() {
     if (!state) return "Loading…";
     if (state.status !== "active") return `Draft is ${state.status}. Click Start.`;
     if (pending) return "Working…";
-    if (currentManager !== activeUser) return `Not your turn. On the clock: ${currentManager ?? "—"}`;
+    if (currentManager !== me) return `Not your turn. On the clock: ${showName(currentManager ?? "")}`;
     return "Your turn — pick a goal.";
-  }, [state, pending, currentManager, activeUser]);
+  }, [state, pending, currentManager, me, showName]);
 
   // ---- RPC calls ----
   const callRpc = async (label: typeof pending, fn: () => Promise<{ error: any }>, okMsg: string) => {
@@ -332,13 +349,14 @@ export default function DraftPage() {
   };
 
   const onStart = () =>
-    callRpc("start", () => supabase.rpc("draft_start", { p_league_id: LEAGUE_ID }) as any, "Draft started / restarted.");
+    callRpc("start", () => supabase.rpc("draft_start", { p_league_id: leagueId }) as any, "Draft started / restarted.");
 
   const onAutopick = () =>
-    callRpc("autopick", () => supabase.rpc("draft_autopick", { p_league_id: LEAGUE_ID }) as any, "Autopick executed.");
+    callRpc("autopick", () => supabase.rpc("draft_autopick", { p_league_id: leagueId }) as any, "Autopick executed.");
 
   const pickTask = async (t: TaskRow) => {
     setErr("");
+
     if (draftedSet.has(taskKey(t))) {
       setStatusMsg("That goal is already drafted.");
       return;
@@ -355,8 +373,8 @@ export default function DraftPage() {
       setStatusMsg("Please wait…");
       return;
     }
-    if (currentManager !== activeUser) {
-      setStatusMsg(`Not your turn — on the clock: ${currentManager ?? "—"}.`);
+    if (currentManager !== me) {
+      setStatusMsg(`Not your turn — on the clock: ${showName(currentManager ?? "")}.`);
       return;
     }
 
@@ -364,20 +382,21 @@ export default function DraftPage() {
       "pick",
       () =>
         supabase.rpc("draft_make_pick", {
-          p_league_id: LEAGUE_ID,
+          p_league_id: leagueId,
           p_drafted_user_id: t.user_id,
           p_timeframe: t.timeframe,
           p_slot_index: t.slot_index,
         }) as any,
-      `Picked: ${t.user_id} ${t.timeframe} goal ${t.slot_index + 1}`
+      `Picked: ${showName(t.user_id)} · ${t.timeframe} (slot ${t.slot_index + 1})`
     );
   };
 
   function DraftSection({ tf, items }: { tf: Timeframe; items: TaskRow[] }) {
+    const header = tf === "yearly" ? "Yearly" : tf === "monthly" ? "Monthly" : "Weekly";
     return (
       <div className={"rounded-3xl border p-4 " + timeframePanelClass(tf)}>
         <div className="flex items-center justify-between">
-          <div className="text-lg font-black text-slate-900">{tf === "yearly" ? "Yearly Goals ✨" : tf === "monthly" ? "Monthly" : "Weekly"}</div>
+          <div className="text-lg font-black text-slate-900">{header}</div>
           <TimeframePill tf={tf} />
         </div>
 
@@ -395,7 +414,7 @@ export default function DraftPage() {
               <div key={taskKey(t)} className={cardClass}>
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-sm font-black text-slate-900">
-                    {t.user_id} — Goal {t.slot_index + 1}
+                    {showName(t.user_id)} · slot {t.slot_index + 1}
                   </div>
                   <TimeframePill tf={t.timeframe} />
                 </div>
@@ -470,13 +489,13 @@ export default function DraftPage() {
               {rows.map((r) => (
                 <tr key={r.i} className={r.isCurrent ? "bg-amber-50/60" : ""}>
                   <td className="px-3 py-2 font-semibold text-slate-700">{r.i + 1}</td>
-                  <td className="px-3 py-2 font-semibold text-slate-900">{r.manager}</td>
+                  <td className="px-3 py-2 font-semibold text-slate-900">{showName(r.manager)}</td>
                   <td className="px-3 py-2 text-slate-700">
                     {r.p ? (
                       <>
-                        <span className="font-bold">{r.p.drafted_user_id}</span>{" "}
+                        <span className="font-bold">{showName(r.p.drafted_user_id)}</span>{" "}
                         <span className="text-slate-500">
-                          ({r.p.timeframe} #{r.p.slot_index + 1})
+                          ({r.p.timeframe} · {r.p.slot_index + 1})
                         </span>
                       </>
                     ) : (
@@ -504,10 +523,11 @@ export default function DraftPage() {
       tf: Timeframe;
       rows: { timeframe: Timeframe; roster_slot_index: number; filled: boolean; player_id: string | null; goal_title: string | null }[];
     }) => {
+      const header = tf === "yearly" ? "Yearly" : tf === "monthly" ? "Monthly" : "Weekly";
       return (
         <div className={"rounded-2xl border p-3 " + timeframePanelClass(tf)}>
           <div className="flex items-center justify-between">
-            <div className="text-sm font-black text-slate-900">{tf === "yearly" ? "Yearly ✨" : tf === "monthly" ? "Monthly" : "Weekly"}</div>
+            <div className="text-sm font-black text-slate-900">{header}</div>
             <TimeframePill tf={tf} />
           </div>
 
@@ -524,7 +544,7 @@ export default function DraftPage() {
                       {tf === "weekly" ? "W" : tf === "monthly" ? "M" : "Y"}{s.roster_slot_index + 1}
                     </span>
                   </div>
-                  <div className="truncate text-right text-xs font-black text-slate-900">{s.filled ? s.player_id : "—"}</div>
+                  <div className="truncate text-right text-xs font-black text-slate-900">{s.filled ? showName(s.player_id!) : "—"}</div>
                 </div>
                 <div className="mt-1 line-clamp-2 text-[11px] text-slate-600">
                   {s.filled ? s.goal_title : "Pick a goal in this category."}
@@ -541,7 +561,7 @@ export default function DraftPage() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="text-xs font-bold uppercase text-slate-600">My roster</div>
-            <div className="text-lg font-black text-slate-900">{activeUser}</div>
+            <div className="text-lg font-black text-slate-900">{showName(me)}</div>
             <div className="mt-1 text-xs text-slate-600">
               Remaining:{" "}
               <span className="font-bold text-sky-700">{remainingSlots.weekly}W</span>{" "}
@@ -552,7 +572,7 @@ export default function DraftPage() {
 
           <div className="text-right">
             <div className="text-xs font-bold uppercase text-slate-600">On the clock</div>
-            <div className="text-base font-black text-slate-900">{currentManager ?? "—"}</div>
+            <div className="text-base font-black text-slate-900">{currentManager ? showName(currentManager) : "—"}</div>
             <div
               className={
                 "mt-1 inline-flex items-center rounded-xl border px-3 py-1 text-xs font-bold " +
@@ -611,6 +631,8 @@ export default function DraftPage() {
       </div>
     );
   }
+
+  if (authLoading) return null;
 
   return (
     <main className="min-h-screen bg-slate-50 text-slate-900">
